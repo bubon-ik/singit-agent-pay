@@ -64,6 +64,7 @@ test("GET /api/state has the right shape and reflects a mandate+hold created dir
     expect(empty.disputes).toEqual([]);
     expect(empty.audit).toEqual([]);
     expect(empty.holds).toEqual([]);
+    expect(empty.ops).toEqual([]);
 
     const mandate = await service.createMandate({
       actor: "payer",
@@ -85,6 +86,11 @@ test("GET /api/state has the right shape and reflects a mandate+hold created dir
     expect(state.holds[0].id).toBe(hold.id);
     expect(state.holds[0].maximum).toBe("500000");
     expect(state.audit.length).toBeGreaterThan(0);
+    expect(state.ops).toHaveLength(1);
+    expect(state.ops[0].action).toBe("hold");
+    expect(state.ops[0].state).toBe("succeeded");
+    expect(state.ops[0].holdId).toBe(hold.id);
+    expect(state.ops[0].reservation).toBe("500000");
   } finally {
     await closeServer(server);
   }

@@ -173,10 +173,20 @@ export interface ResolveDisputeArgs {
   idempotencyKey?: string;
 }
 
-/** Converts a thrown BackendError into a Refusal("BACKEND_ERROR", ...); passes everything else through. */
+/** Backend codes for a definite, non-retryable "the refund/dispute window is closed" failure
+ * (capture402's `refund_deadline_expired` and any future facilitator synonym for it) map to the
+ * same RefusalCode open_dispute already uses for that condition, rather than a generic
+ * BACKEND_ERROR (QA P-L1). */
+const REFUND_WINDOW_CLOSED_BACKEND_CODES = new Set(["refund_deadline_expired"]);
+
+/** Converts a thrown BackendError into a Refusal (BACKEND_ERROR, unless its code maps to a more
+ * specific RefusalCode); passes everything else through. */
 function toRefusal(err: unknown): Refusal {
   if (err instanceof Refusal) return err;
   if (err instanceof BackendError) {
+    if (REFUND_WINDOW_CLOSED_BACKEND_CODES.has(err.code)) {
+      return new Refusal("REFUND_WINDOW_CLOSED", `BLOCKED: backend error (${err.code}): ${err.message}`);
+    }
     return new Refusal("BACKEND_ERROR", `BLOCKED: backend error (${err.code}): ${err.message}`);
   }
   throw err;
@@ -345,6 +355,22 @@ export class PaymentService {
   private auditSeq = 0;
   private opSeq = 0;
 
+  /** FIFO tail for serializing every money-moving backend call (hold/capture/release/refund,
+   * including the internal cleanup_release): two concurrent calls on this backend never overlap
+   * in flight, even though the per-mandate/per-hold reservation checks above already make their
+   * outcome race-free. Chaining through .then(fn, fn) runs fn after the tail settles either way;
+   * the tail itself is re-derived with a swallowed-error chain so one failed call never wedges it. */
+  private backendTail: Promise<unknown> = Promise.resolve();
+
+  private withBackendLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.backendTail.then(fn, fn);
+    this.backendTail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
   constructor(opts: PaymentServiceOptions) {
     this.backend = opts.backend;
     this.now = opts.now ?? (() => Math.floor(Date.now() / 1000));
@@ -472,30 +498,36 @@ export class PaymentService {
   }
 
   /**
-   * Awaits a money-moving backend call, durably recording op.prepared before the send (via
-   * onPrepared) so a later reconcile can find it even if this call's response is lost. On
-   * failure: a definite BackendError marks the op "failed" (and releases the per-hold lock) and
-   * rethrows a Refusal; anything else (ambiguous BackendError, or any non-BackendError throw)
-   * marks the op "unknown" (lock stays held) and throws OPERATION_UNKNOWN.
+   * Awaits a money-moving backend call (serialized against every other such call on this
+   * backend, see withBackendLock), durably recording op.prepared before the send (via
+   * onPrepared) so a later reconcile can find it even if this call's response is lost.
+   *
+   * On failure: a `BackendError` is a definite outcome (`phase: "validation"` = never executed,
+   * `"confirmed_failure"` = landed with an error) — the op is marked "failed" (and the per-hold
+   * lock released) and a Refusal is rethrown. A `BackendOutcomeUnknown` (possible send, outcome
+   * unproven) is NEVER rethrown raw (P-M1): the op is marked "unknown" (lock stays held) and
+   * OPERATION_UNKNOWN is thrown instead, so the reservation survives for reconcile()/retry. Any
+   * other (non-BackendError) throw is treated the same conservative way.
    */
   private async submit<T>(op: OperationRecord, holdIdForLock: string | null, call: (ctx: SubmitContext) => Promise<T>): Promise<T> {
     try {
-      return await call({
-        onPrepared: (p) => {
-          op.prepared = p;
-          op.updatedAt = this.now();
-          this.store.putOp(op);
-        },
-      });
+      return await this.withBackendLock(() =>
+        call({
+          onPrepared: (p) => {
+            op.prepared = p;
+            op.updatedAt = this.now();
+            this.store.putOp(op);
+          },
+        }),
+      );
     } catch (err) {
-      const ambiguous = err instanceof BackendError ? err.ambiguous : true;
       op.updatedAt = this.now();
-      if (!ambiguous) {
+      if (err instanceof BackendError) {
         const refusal = toRefusal(err);
         op.state = "failed";
         op.error = {
-          code: err instanceof BackendError ? err.code : "error",
-          message: err instanceof Error ? err.message : String(err),
+          code: err.code,
+          message: err.message,
           refusalCode: refusal.code,
         };
         if (holdIdForLock && this.holdLocks.get(holdIdForLock) === op.id) this.holdLocks.delete(holdIdForLock);
@@ -504,6 +536,10 @@ export class PaymentService {
       }
       op.state = "unknown";
       this.store.putOp(op);
+      this.record("OUTCOME_UNKNOWN", op.actor, "blocked", "OPERATION_UNKNOWN", `op ${op.id} (${op.action}) outcome unknown; reservation kept for reconcile`, {
+        mandateId: op.mandateId,
+        holdId: holdIdForLock ?? op.holdId,
+      });
       throw new Refusal("OPERATION_UNKNOWN", `BLOCKED: ${op.action} on ${holdIdForLock ?? op.mandateId} is ambiguous (no confirmed backend response); it will be reconciled`);
     } finally {
       this.inFlight.delete(op.id);
@@ -828,15 +864,17 @@ export class PaymentService {
   private async attemptCleanupRelease(cleanupOp: OperationRecord, hold: Hold): Promise<boolean> {
     this.inFlight.add(cleanupOp.id);
     try {
-      const receipt = await this.backend.release(
-        { holdId: hold.id, expectedHeld: BigInt(cleanupOp.reservation), expectedRefundable: 0n },
-        {
-          onPrepared: (p) => {
-            cleanupOp.prepared = p;
-            cleanupOp.updatedAt = this.now();
-            this.store.putOp(cleanupOp);
+      const receipt = await this.withBackendLock(() =>
+        this.backend.release(
+          { holdId: hold.id, expectedHeld: BigInt(cleanupOp.reservation), expectedRefundable: 0n },
+          {
+            onPrepared: (p) => {
+              cleanupOp.prepared = p;
+              cleanupOp.updatedAt = this.now();
+              this.store.putOp(cleanupOp);
+            },
           },
-        },
+        ),
       );
       hold.held = 0n;
       this.store.putHold(serializeHold(hold));
@@ -933,6 +971,11 @@ export class PaymentService {
 
     const prevState = op.state;
     const kind = RECONCILE_KIND[op.action];
+
+    // getTxOutcome is optional (Capture402Backend does not implement it yet): without it there
+    // is no evidence source to converge against, so the op simply stays pending/unknown until a
+    // same-idempotencyKey retry supplies a terminal result, or a future backend adds it.
+    if (!this.backend.getTxOutcome) return op;
 
     let outcome: TxOutcome;
     try {

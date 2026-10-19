@@ -1,12 +1,14 @@
 /**
  * A PaymentBackend wrapper around MockBackend for exercising PaymentService's UNKNOWN-state
- * handling: it can make any money-moving call ambiguous (before or after the inner mock actually
- * executes), make it fail definitely, delay it on a controlled gate, and make getStatus
+ * handling: it can make any money-moving call throw BackendOutcomeUnknown (before or after the
+ * inner mock actually executes, simulating a lost response to a possible send), make it fail
+ * definitely (a plain BackendError), delay it on a controlled gate, and make getStatus
  * throw/return null/report the wrong mint. createMandate and getTxOutcome always pass through to
  * the inner MockBackend, since reconcile() needs its real txSig bookkeeping to resolve truth.
  */
 import {
   BackendError,
+  BackendOutcomeUnknown,
   type CaptureRequest,
   type EscrowStatus,
   type HoldReceipt,
@@ -19,18 +21,19 @@ import {
   type TxOutcome,
   type TxOutcomeQuery,
   type TxReceipt,
+  type UnknownOperation,
 } from "../../src/backend/types.js";
 import type { MockBackend } from "../../src/backend/mock.js";
 
 export type FaultMode =
   /** No fault: behaves like a plain passthrough. */
   | "none"
-  /** Throws an ambiguous BackendError before the inner backend ever runs (never executes). */
+  /** Throws BackendOutcomeUnknown before the inner backend ever runs (never executes). */
   | "ambiguous-before"
-  /** Calls the inner backend to completion (it executes), then throws an ambiguous BackendError
+  /** Calls the inner backend to completion (it executes), then throws BackendOutcomeUnknown
    * (simulates a lost response after a successful send). */
   | "ambiguous-after"
-  /** Throws a definite (non-ambiguous) BackendError before the inner backend ever runs. */
+  /** Throws a definite BackendError before the inner backend ever runs. */
   | "definite-before";
 
 export type StatusFaultMode = "normal" | "throw" | "null" | "wrong-mint";
@@ -70,8 +73,26 @@ export class FaultyBackend implements PaymentBackend {
   private refundFaults: FaultMode[] = [];
   private statusFaults: StatusFaultMode[] = [];
   private gates: Partial<Record<GatedMethod, Promise<void>>> = {};
+  private evidenceSeq = 0;
 
   constructor(public readonly inner: MockBackend) {}
+
+  /** Minimal UnknownOperation fixture (public values only, no key material) for simulating a
+   * lost/ambiguous response: enough shape to satisfy the type, not a real signed transaction. */
+  private fakeEvidence(operation: "hold" | "capture" | "release" | "refund", holdId = "unknown-before-send"): UnknownOperation {
+    const n = ++this.evidenceSeq;
+    return {
+      operation,
+      holdId,
+      signature: `fault-sig-${n}`,
+      signedTransaction: "ZmF1bHQtd2lyZQ==",
+      blockhash: `fault-blockhash-${n}`,
+      lastValidBlockHeight: "0",
+      programId: "fault-program-id",
+      genesisHash: "fault-genesis-hash",
+      abiCommit: "fault-abi-commit",
+    };
+  }
 
   queueHoldFault(mode: FaultMode): void {
     this.holdFaults.push(mode);
@@ -110,7 +131,7 @@ export class FaultyBackend implements PaymentBackend {
     if (this.gates.hold) await this.gates.hold;
     const fault = this.nextFault(this.holdFaults);
     if (fault === "ambiguous-before") {
-      throw new BackendError("test_fault", "simulated: ambiguous failure before send", { ambiguous: true });
+      throw new BackendOutcomeUnknown(this.fakeEvidence("hold"));
     }
     if (fault === "definite-before") {
       throw new BackendError("test_fault", "simulated: definite failure before send");
@@ -118,7 +139,7 @@ export class FaultyBackend implements PaymentBackend {
     const receipt = await this.inner.hold(req, ctx);
     this.executedHoldCalls++;
     if (fault === "ambiguous-after") {
-      throw new BackendError("test_fault", "simulated: response lost after successful send", { ambiguous: true });
+      throw new BackendOutcomeUnknown(this.fakeEvidence("hold", receipt.holdId));
     }
     return receipt;
   }
@@ -128,7 +149,7 @@ export class FaultyBackend implements PaymentBackend {
     if (this.gates.capture) await this.gates.capture;
     const fault = this.nextFault(this.captureFaults);
     if (fault === "ambiguous-before") {
-      throw new BackendError("test_fault", "simulated: ambiguous failure before send", { ambiguous: true });
+      throw new BackendOutcomeUnknown(this.fakeEvidence("capture", req.holdId));
     }
     if (fault === "definite-before") {
       throw new BackendError("test_fault", "simulated: definite failure before send");
@@ -136,7 +157,7 @@ export class FaultyBackend implements PaymentBackend {
     const receipt = await this.inner.capture(req, ctx);
     this.executedCaptureCalls++;
     if (fault === "ambiguous-after") {
-      throw new BackendError("test_fault", "simulated: response lost after successful send", { ambiguous: true });
+      throw new BackendOutcomeUnknown(this.fakeEvidence("capture", req.holdId));
     }
     return receipt;
   }
@@ -146,7 +167,7 @@ export class FaultyBackend implements PaymentBackend {
     if (this.gates.release) await this.gates.release;
     const fault = this.nextFault(this.releaseFaults);
     if (fault === "ambiguous-before") {
-      throw new BackendError("test_fault", "simulated: ambiguous failure before send", { ambiguous: true });
+      throw new BackendOutcomeUnknown(this.fakeEvidence("release", req.holdId));
     }
     if (fault === "definite-before") {
       throw new BackendError("test_fault", "simulated: definite failure before send");
@@ -154,7 +175,7 @@ export class FaultyBackend implements PaymentBackend {
     const receipt = await this.inner.release(req, ctx);
     this.executedReleaseCalls++;
     if (fault === "ambiguous-after") {
-      throw new BackendError("test_fault", "simulated: response lost after successful send", { ambiguous: true });
+      throw new BackendOutcomeUnknown(this.fakeEvidence("release", req.holdId));
     }
     return receipt;
   }
@@ -164,7 +185,7 @@ export class FaultyBackend implements PaymentBackend {
     if (this.gates.refund) await this.gates.refund;
     const fault = this.nextFault(this.refundFaults);
     if (fault === "ambiguous-before") {
-      throw new BackendError("test_fault", "simulated: ambiguous failure before send", { ambiguous: true });
+      throw new BackendOutcomeUnknown(this.fakeEvidence("refund", req.holdId));
     }
     if (fault === "definite-before") {
       throw new BackendError("test_fault", "simulated: definite failure before send");
@@ -172,7 +193,7 @@ export class FaultyBackend implements PaymentBackend {
     const receipt = await this.inner.refund(req, ctx);
     this.executedRefundCalls++;
     if (fault === "ambiguous-after") {
-      throw new BackendError("test_fault", "simulated: response lost after successful send", { ambiguous: true });
+      throw new BackendOutcomeUnknown(this.fakeEvidence("refund", req.holdId));
     }
     return receipt;
   }

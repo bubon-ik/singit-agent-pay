@@ -46,7 +46,9 @@ export type AuditAction =
   // "reset" is the only action that is not an MCP tool: HTTP POST /human/reset only (mock backend).
   | "reset"
   // one row per operation state transition during reconcile(); not an MCP tool call itself.
-  | "reconcile";
+  | "reconcile"
+  // BackendOutcomeUnknown / lost response: reservation kept. Dashboard matches case-insensitively.
+  | "OUTCOME_UNKNOWN";
 
 export const AUDIT_SCHEMA_VERSION = 1 as const;
 

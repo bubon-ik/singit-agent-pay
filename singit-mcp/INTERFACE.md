@@ -113,6 +113,50 @@ Schema: `AuditEntry` in [`src/audit.ts`](src/audit.ts). Fields are only ever add
 
 Keys: devnet throwaway keypairs generated locally by the team, loaded from env (`SINGIT_PAYER_KEYPAIR` / `SINGIT_MERCHANT_KEYPAIR`), never committed; agents never see keys. Never real or mainnet keys.
 
+## Operation journal, UNKNOWN outcomes, idempotency & salt reuse
+
+Every money-moving call (`hold`/`capture`/`release`/`refund`/`resolve_dispute`, plus the internal
+`cleanup_release`) runs through a durable `OperationRecord` (`src/store.ts`): `id, key, action,
+actor, mandateId, holdId, disputeId?, params (+paramsHash), salt?, prepared?, expected?, state,
+result?, error?, reservation, createdAt, updatedAt`. `state` moves `pending` -> `succeeded` |
+`failed` | `unknown`.
+
+- **`OPERATION_UNKNOWN`:** thrown when the backend throws `BackendOutcomeUnknown` (a possible send
+  whose outcome is unproven) or anything else non-`BackendError` escapes the call — never
+  reclassified as a definite failure. The reservation is kept, the per-hold lock stays held, and
+  the op is marked `unknown`. It converges via `reconcile(opId)` / `reconcilePending()` (run at
+  startup for ops a previous process left `pending`), or a retry with the **same
+  `idempotencyKey`** (which reconciles first, then replays).
+- **`BackendError`** is a definite outcome: `phase: "validation"` (never executed) or
+  `"confirmed_failure"` (landed with an error) both mark the op `failed`, free its reservation
+  (except `cleanup_release`, where the underlying hold is still genuinely held on-chain and must
+  keep being retried), and surface a `Refusal`. `BackendError.code === "refund_deadline_expired"`
+  (and any future facilitator synonym for it) maps to `REFUND_WINDOW_CLOSED` instead of the
+  generic `BACKEND_ERROR`, matching `open_dispute`'s code for the same condition.
+- **Idempotency:** the scoped key is `${action}:${actor}:${idempotencyKey}`. Same key + same
+  params -> replays the (now-terminal) result, reconciling first if still `pending`/`unknown`.
+  Same key + different params -> `IDEMPOTENCY_KEY_REUSED`.
+- **Salt:** generated once per `hold` call and durably persisted on the op **before**
+  `backend.hold()` is awaited (the journal write happens synchronously, before the first `await`).
+  A reconcile or an idempotent replay of that same op never regenerates the salt or targets a new
+  PDA.
+- **`getTxOutcome` is optional** on `PaymentBackend` — `Capture402Backend` does not implement it
+  yet. When absent, `reconcile()` leaves the op `pending`/`unknown` rather than throwing; a
+  same-idempotencyKey retry (which reconciles via `getStatus` where applicable) and a future
+  `getTxOutcome` remain the ways to converge it. `MockBackend` implements it, so it exercises the
+  full reconcile path in tests.
+- **`onPrepared` (`SubmitContext`)** is optional too: a backend that calls it durably records
+  `op.prepared` (`txSig`/`holdId`/`lastValidBlockHeight`) before sending, so a reconcile after a
+  lost response can still resolve truth even without `getTxOutcome`, as long as `getStatus`
+  reflects the attempt.
+- **Backend calls are serialized:** every money-moving backend call on a given `PaymentService`
+  instance runs through one FIFO queue, so two concurrent calls (e.g. two holds racing on the same
+  mandate) never overlap in flight on the backend, even though the reservation/lock checks above
+  already make their outcome race-free.
+
+`GET /api/state` also returns `ops: OperationRecord[]` (same shape as above, amounts as decimal
+strings; `v` stays `1`).
+
 ## MCP tools (schemas: `toolSchemas` in [`src/server.ts`](src/server.ts), zod)
 
 Amounts are base-unit decimal strings (`"2500000"` = 2.5 USDC). Times are integer unix seconds. Every write takes `actor`, the calling agent's id/address. The audit `action` is exactly the tool name. **`hold` is the pay tool**; there is no separate `pay`.
@@ -140,8 +184,9 @@ Amounts are base-unit decimal strings (`"2500000"` = 2.5 USDC). Times are intege
 - stdio (default): `npx tsx src/index.ts`
 - streamable HTTP: `--http` or `SINGIT_MCP_HTTP=1`. Binds `127.0.0.1`, **port 8787** (override with `PORT`), path `/mcp`, `GET /health`. Stateless, with one shared in-memory state per process.
 - Backend: `SINGIT_BACKEND=mock` (default) or `capture402` (built by `buildBackendFromEnv`; explicit provider/deployment configuration required, see devnet guide). `SINGIT_MOCK_BALANCES='{"buyer-agent":"100000000"}'`.
+- Durable state (optional): `SINGIT_STATE_DIR` points `PaymentService` at a `FileStateStore` journal directory (`state.jsonl`); unset = in-memory `MemoryStateStore`, nothing survives a restart. Devnet signing keys: `SINGIT_PAYER_KEYPAIR`, `SINGIT_MERCHANT_KEYPAIR` (file paths only — see "Capture402Backend implementation" above; never log or print their contents).
 - HTTP handler lives in `src/http.ts` (`createHttpHandler`); `src/index.ts` just wires env/backend into it. Two rate-limit buckets, each its own `createRateLimiter` instance keyed by `cf-connecting-ip` header ?? socket address: `"mcp"` (`SINGIT_RATE_LIMIT_PER_MIN`, default 120) covers `/mcp` and `/human/resolve`; `"state"` (`SINGIT_STATE_RATE_LIMIT_PER_MIN`, default 600) covers `GET /api/state`. Over the limit: `429 {ok:false, error:"rate limited"}` with `Retry-After: 60`.
-- `GET /api/state`: dashboard snapshot — `{v: 1, backend, mandates, disputes, audit, holds}` (bigints as decimal strings; `holds` is every hold across all mandates). `Access-Control-Allow-Origin: *` (read-only, GET only).
+- `GET /api/state`: dashboard snapshot — `{v: 1, backend, mandates, disputes, audit, holds, ops}` (bigints as decimal strings; `holds` is every hold across all mandates, `ops` is every operation journal record — see "Operation journal" above). `Access-Control-Allow-Origin: *` (read-only, GET only).
 - `POST /human/resolve`: human console for `resolve_dispute`, same shape as the MCP tool (`{disputeId, outcome, refundAmount?, actor?, approvalToken?}`), no CORS. The request always needs header `x-singit-human-secret` equal to `SINGIT_HUMAN_ROUTE_SECRET` (only honored if ≥16 chars), checked first regardless of `approvalToken`. If `approvalToken` is in the body it's passed through as-is (the service HMAC-verifies it); otherwise the server mints the token itself. Missing/wrong header → 401 `HUMAN_AUTH_REQUIRED`; route secret not configured → 403 `HUMAN_ROUTE_DISABLED`; refusal from the service (e.g. a forged/invalid token) → 409 `{ok:false, code, reason}`; bad JSON/amount → 400 `INVALID_INPUT`. Body capped at 64 KB. Success: 200 `{ok:true, dispute, txSig}`.
 - `POST /human/reset` (HTTP only, not an MCP tool): same `x-singit-human-secret` auth as `/human/resolve` (403 `HUMAN_ROUTE_DISABLED` / 401 `HUMAN_AUTH_REQUIRED`; `approvalToken` is not accepted), checked before the mode check. Only works on the mock backend — otherwise 409 `{ok:false, code:"RESET_MOCK_ONLY"}`. Replaces the shared `PaymentService` with a fresh one seeded from `DEFAULT_MOCK_BALANCES`/`SINGIT_MOCK_BALANCES`, records one `"reset"` audit entry, and responds 200 `{ok:true, reset:true, audit}`. Body optional `{actor?: string}`, default `"human"`.
 - Default mock balances (`DEFAULT_MOCK_BALANCES` in `src/backend/mock.ts`, used whenever `SINGIT_MOCK_BALANCES` is unset): `buyer-agent` and `agent:research-bot` 100 USDC; `seller-agent`, `agent:data-vendor` and `agent:gpu-broker` 20 USDC (the dashboard story uses the `agent:` ids).

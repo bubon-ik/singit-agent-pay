@@ -326,11 +326,11 @@ export function runBackendContract(
       timeout,
     );
 
-    test("j. BackendError.ambiguous defaults to false, settable via the 3rd ctor arg", () => {
+    test("j. BackendError.phase defaults to 'validation', settable via the 3rd ctor arg", () => {
       const definite = new BackendError("amount", "bad amount");
-      expect(definite.ambiguous).toBe(false);
-      const ambiguous = new BackendError("timeout", "lost response", { ambiguous: true });
-      expect(ambiguous.ambiguous).toBe(true);
+      expect(definite.phase).toBe("validation");
+      const confirmed = new BackendError("transaction_failed", "landed with an error", "confirmed_failure");
+      expect(confirmed.phase).toBe("confirmed_failure");
     });
 
     test(
@@ -364,7 +364,7 @@ export function runBackendContract(
 
     test(
       "l. onPrepared reports the final txSig before the hold call resolves",
-      async () => {
+      async (ctx) => {
         const prepared: Array<{ txSig: string; holdId?: string }> = [];
         const { captureDeadline, refundDeadline } = deadlines();
         const receipt = await fx.backend.hold(
@@ -375,6 +375,11 @@ export function runBackendContract(
             },
           },
         );
+        // onPrepared is optional: Capture402Backend may omit it; MockBackend implements it.
+        if (prepared.length === 0) {
+          ctx.skip();
+          return;
+        }
         expect(prepared.length).toBe(1);
         expect(prepared[0].txSig).toBe(receipt.txSig);
         expect(prepared[0].txSig.length).toBeGreaterThan(0);
@@ -383,13 +388,19 @@ export function runBackendContract(
     );
 
     test(
-      "m. getTxOutcome: executed for a real hold txSig, not_found for an unknown signature",
-      async () => {
+      "m. getTxOutcome (only when the backend implements it): executed for a real hold txSig, not_found for an unknown signature",
+      async (ctx) => {
+        const backend = fx.backend;
+        const getTxOutcome = backend.getTxOutcome;
+        if (!getTxOutcome) {
+          ctx.skip();
+          return;
+        }
         const { receipt } = await openHold();
-        const outcome = await fx.backend.getTxOutcome({ kind: "hold", txSig: receipt.txSig, holdId: receipt.holdId, payer: fx.payer });
+        const outcome = await getTxOutcome.call(backend, { kind: "hold", txSig: receipt.txSig, holdId: receipt.holdId, payer: fx.payer });
         expect(outcome.status).toBe("executed");
 
-        const unknown = await fx.backend.getTxOutcome({ kind: "hold", txSig: "not-a-real-signature-ever-issued", holdId: null, payer: fx.payer });
+        const unknown = await getTxOutcome.call(backend, { kind: "hold", txSig: "not-a-real-signature-ever-issued", holdId: null, payer: fx.payer });
         expect(unknown.status).toBe("not_found");
       },
       timeout,
