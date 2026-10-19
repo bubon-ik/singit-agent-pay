@@ -5,7 +5,7 @@
  * Every stored amount-like field is a decimal string (bigint serialized), never a bigint or
  * number, so a Snapshot round-trips through JSON without a custom reviver.
  */
-import { appendFileSync, chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import type { AuditEntry, RefusalCode } from "./audit.js";
 import type { PreparedTx } from "./backend/types.js";
@@ -220,7 +220,19 @@ export class FileStateStore implements StateStore {
       try {
         rec = JSON.parse(lines[i]) as RecordLine;
       } catch (err) {
-        if (i === lines.length - 1) continue; // crash mid-write: tolerate a truncated last line
+        if (i === lines.length - 1) {
+          // Remove the interrupted tail before the next append; otherwise it becomes a
+          // corrupt interior line and prevents the following restart from loading.
+          const prefix = lines.slice(0, i).join("\n") + (i > 0 ? "\n" : "");
+          const fd = openSync(this.filePath, "r+");
+          try {
+            ftruncateSync(fd, Buffer.byteLength(prefix));
+            fsyncSync(fd);
+          } finally {
+            closeSync(fd);
+          }
+          continue;
+        }
         throw new Error(`corrupt state store ${this.filePath}:${i + 1}: ${(err as Error).message}`);
       }
       switch (rec.t) {

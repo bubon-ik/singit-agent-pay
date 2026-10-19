@@ -758,6 +758,7 @@ export class PaymentService {
     op: OperationRecord,
     holdId: string,
     txSig: string | undefined,
+    readOnly = false,
   ): Promise<{ kind: "unknown" } | { kind: "wrong_mint"; cleanupSucceeded: boolean; statusMint: string | null } | { kind: "ok"; hold: Hold }> {
     const mandate = this.mandates.get(op.mandateId);
     const p = op.params as Record<string, unknown>;
@@ -784,6 +785,13 @@ export class PaymentService {
     }
 
     const mismatched = status.mint !== this.mint || status.maximum !== amount || status.payer !== mandate.payer || status.payee !== payee;
+    if (mismatched && readOnly) {
+      op.state = "unknown";
+      op.result = { holdId, txSig };
+      op.updatedAt = this.now();
+      this.store.putOp(op);
+      return { kind: "unknown" };
+    }
     if (mismatched) {
       op.state = "succeeded";
       // Cleanup owns the still committed funds; this op's reservation no longer
@@ -969,7 +977,7 @@ export class PaymentService {
   /** Converges a single op with on-chain truth. A no-op if it is already terminal, or if its
    * backend call is still actively in flight in this process (see `inFlight`): racing that call
    * is exactly how a devnet getTxOutcome saying not_found before send would cause a double-free. */
-  async reconcile(opId: string): Promise<OperationRecord> {
+  async reconcile(opId: string, options: { readOnly?: boolean } = {}): Promise<OperationRecord> {
     const op = this.ops.get(opId);
     if (!op) throw new Refusal("INVALID_INPUT", `BLOCKED: unknown operation ${opId}`);
     if (op.state === "succeeded" || op.state === "failed") return op;
@@ -1010,6 +1018,8 @@ export class PaymentService {
 
     if (outcome.status === "not_found" || outcome.status === "failed") {
       if (op.action === "cleanup_release") {
+        // Startup recovery may observe an earlier cleanup, but must never sign a new one.
+        if (options.readOnly) return op;
         await this.retryCleanupRelease(op, prevState);
         return op;
       }
@@ -1035,7 +1045,7 @@ export class PaymentService {
         }
         return op;
       }
-      const result = await this.verifyAndFinalizeHold(op, holdId, txSig);
+      const result = await this.verifyAndFinalizeHold(op, holdId, txSig, options.readOnly);
       if (result.kind === "ok") {
         this.recordReconcile(op, prevState, "succeeded", "on-chain hold confirmed executed");
       } else if (result.kind === "wrong_mint") {
@@ -1067,11 +1077,11 @@ export class PaymentService {
   }
 
   /** Reconciles every op still pending/unknown. Best-effort: one op's failure does not stop the rest. */
-  async reconcilePending(): Promise<void> {
+  async reconcilePending(options: { readOnly?: boolean } = {}): Promise<void> {
     const targets = [...this.ops.values()].filter((o) => o.state === "pending" || o.state === "unknown");
     for (const op of targets) {
       try {
-        await this.reconcile(op.id);
+        await this.reconcile(op.id, options);
       } catch {
         // leave it for the next reconcilePending() call
       }

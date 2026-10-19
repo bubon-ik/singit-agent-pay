@@ -21,7 +21,8 @@
     "demo": "tsx scripts/demo.ts",
     "approve": "tsx scripts/approve.ts",
     "devnet:smoke": "tsx scripts/devnet-smoke.ts",
-    "demo:all": "bash scripts/demo-all.sh"
+    "demo:all": "bash scripts/demo-all.sh",
+    "live:all": "bash scripts/live-all.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

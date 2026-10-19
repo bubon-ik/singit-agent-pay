@@ -100,7 +100,7 @@ Use a secret at least 16 characters long. `amount` is in USDC base units and is 
 
 ## Backends
 
-`MockBackend` is the default in-memory backend for demos and tests. Set `SINGIT_BACKEND=capture402` to select `Capture402Backend`; it is currently a stub; the teammate implements it. It must pass the conformance suite in `test/backend-contract.ts` (gated devnet run: `SINGIT_CONTRACT_DEVNET=1` + keypair env) before the demo says "devnet". `npm run devnet:smoke` runs hold 1 / capture 0.6 / release on devnet with your own keys (no env: prints a checklist and exits 1). See INTERFACE.md, "For the Capture402Backend implementer".
+`MockBackend` is the default in-memory backend for demos and tests. `SINGIT_BACKEND=capture402` selects the implemented Solana devnet backend. Its MCP runtime requires a private `SINGIT_STATE_DIR` outside Git and reconciles original pending transactions before accepting writes. `npm run devnet:smoke` exercises hold 1 / capture 0.6 / release 0.4 / refund 0.2 with isolated devnet keys; without configuration it prints a checklist and exits without sending. [Live demo setup](../docs/LIVE-DEMO.md) starts the MCP and dashboard against the configured public wallet identities. Local tests do not establish live acceptance.
 
 Default mock balances (`DEFAULT_MOCK_BALANCES`): `buyer-agent` and `agent:research-bot` 100 USDC; `seller-agent`, `agent:data-vendor` and `agent:gpu-broker` 20 USDC. `SINGIT_MOCK_BALANCES` (JSON of address to base units, e.g. `'{"agent:research-bot":"100000000"}'`) replaces them entirely. `POST /human/reset` (mock only, human secret header) restores them and clears all state.
 

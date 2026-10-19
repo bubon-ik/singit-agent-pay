@@ -5,7 +5,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const B = (v) => { try { return BigInt(v ?? 0); } catch { return 0n; } };
 const fmt = (v, d = 2) => { const b = B(v); const n = Number(b) / 1e6; return n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: 6 }); };
 const pct = (a, t) => (B(t) === 0n ? 0 : Number((B(a) * 10000n) / B(t)) / 100);
-const short = (a) => String(a ?? "").replace(/^agent:/, "");
+const short = (a) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(String(a ?? "")) ? `${a.slice(0, 6)}…${a.slice(-4)}` : String(a ?? "").replace(/^agent:/, "");
 const time = (ts) => new Date(ts).toLocaleTimeString("en-GB", { hour12: false });
 const CLUSTER = "devnet"; // demo is Solana devnet only
 
@@ -137,9 +137,9 @@ async function refresh() {
   const st = s.story;
   // Header badge shows chain state; its tooltip identifies the selected backend mode.
   const b = $("backend"); b.textContent = `backend: ${s.chain}`; b.className = `pill ${s.chain}`;
-  $("subtitle").textContent = `Programmable mandates · ${s.chain === "mock" ? "USDC escrow (mock; capture402 on devnet next)" : "USDC escrow on Solana devnet (capture402)"} · human-approved disputes`;
+  $("subtitle").textContent = s.chain === "unavailable" ? s.storyBlocker : `Programmable mandates · ${s.chain === "mock" ? "USDC escrow (mock; capture402 on devnet next)" : "USDC escrow on Solana devnet (capture402)"} · human-approved disputes`;
   const mode = s.backend === "mcp-http" ? "mcp-http" : s.backend === "local" ? "local" : "in-process";
-  b.title = `${mode} — ${s.backendNote}${s.chain === "mock" ? " — tx refs are mock receipts" : " — real Solana devnet signatures"}`;
+  b.title = `${mode} — ${s.backendNote}${s.chain === "mock" ? " — tx refs are mock receipts" : s.chain === "devnet" ? " — real Solana devnet signatures" : ""}`;
   $("cluster").textContent = "explorer: solana devnet";
   $("stepNo").textContent = st.step; $("stepTotal").textContent = st.total || 13;
   $("storyFill").style.width = `${st.total ? (st.step / st.total) * 100 : 0}%`;
@@ -148,9 +148,12 @@ async function refresh() {
   $("countdown").textContent = st.state === "running" ? (st.paused ? "⏸ paused" : st.nextInMs == null ? "manual — press →" : `next in ${(st.nextInMs / 1000).toFixed(1)} s`)
     : st.state === "awaiting-human" ? "waiting for human" : st.state === "done" ? "✓ done" : "idle";
   $("pause").textContent = st.paused ? "▶ Resume" : "⏸ Pause";
-  $("pause").disabled = st.state !== "running"; $("next").disabled = !(st.state === "running" || (st.state === "idle" && !s.timeline.length));
+  $("pause").disabled = st.state !== "running"; $("next").disabled = !!s.storyBlocker || !(st.state === "running" || (st.state === "idle" && !s.timeline.length));
   $("next").textContent = st.state === "idle" ? "Start ▶" : "Next step ▶";
-  $("run").disabled = st.state !== "idle" || s.timeline.length > 0; $("run").title = $("run").disabled ? "Results stay on screen — press Reset to replay" : "";
+  $("run").disabled = !!s.storyBlocker || st.state !== "idle" || s.timeline.length > 0;
+  $("run").textContent = s.chain === "devnet" ? "▶ Run devnet story" : "▶ Run demo story";
+  $("run").title = s.storyBlocker ?? ($("run").disabled ? "Results stay on screen — press Reset to replay" : "");
+  $("reset").disabled = s.chain === "devnet" || !!s.storyBlocker;
   const renderIfChanged = (name, data, render) => {
     const signature = JSON.stringify(data);
     if (cardSignatures.get(name) === signature) return;
@@ -186,7 +189,10 @@ else if (q.get("delay")) { const v = q.get("delay"); if (![...$("pace").options]
 const paceBody = () => { const v = $("pace").value; return v === "fast" ? { delay: 1100, mode: "auto" } : v === "manual" ? { delay: "manual", mode: "presenter" } : { delay: Math.round(Number(v) * 1000), mode: "presenter" }; };
 
 async function start() {
-  const r = await post("/api/story", paceBody());
+  if (S?.storyBlocker) return toast(S.storyBlocker);
+  const confirmedDevnet = S?.chain === "devnet";
+  if (confirmedDevnet && !window.confirm("Run the Solana devnet story? It authorizes 7 test USDC across two holds, captures 6.5 and returns 0.5 before the dispute. A separate human click can refund another 4 USDC. SOL pays transaction fees and rent. Both seller roles use the configured merchant wallet.")) return;
+  const r = await post("/api/story", { ...paceBody(), confirmedDevnet });
   if (r.ok === false) toast(r.message); refresh();
 }
 async function next() {

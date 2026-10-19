@@ -43,6 +43,9 @@ if [ ! -f "$ENV_FILE" ]; then
   echo "demo:all: created $ENV_FILE with fresh local dev secrets" >&2
 fi
 set -a; . "$ENV_FILE"; set +a
+if [ "${SINGIT_BACKEND:-mock}" != mock ] || [ -n "${SINGIT_STATE_DIR:-}" ]; then
+  die "demo:all is mock-only; use npm run live:all -- /absolute/path/to/private/devnet.env for devnet"
+fi
 
 # 4. Ports free?
 port_busy() { node -e 'const s=require("net").createServer();s.once("error",()=>process.exit(0));s.listen(+process.argv[1],"127.0.0.1",()=>s.close(()=>process.exit(1)))' "$1"; }
@@ -57,7 +60,7 @@ killtree() { local c; for c in $(pgrep -P "$1" 2>/dev/null); do killtree "$c"; d
 cleanup() { trap - INT TERM EXIT; for p in $PIDS; do killtree "$p"; done; wait 2>/dev/null || true; echo "demo:all: stopped." >&2; }
 trap cleanup INT TERM EXIT
 
-(cd "$ROOT" && PORT="$MCP_PORT" exec ./node_modules/.bin/tsx src/index.ts --http) &
+(cd "$ROOT" && PORT="$MCP_PORT" SINGIT_BACKEND=mock exec ./node_modules/.bin/tsx src/index.ts --http) &
 MCP_PID="$!"
 PIDS="$MCP_PID"
 
@@ -93,7 +96,7 @@ echo "  State (JSON):          http://127.0.0.1:$MCP_PORT/api/state" >&2
 
 # Start dashboard if available (only after MCP is healthy)
 if [ "$HAVE_DASH" = 1 ]; then
-  (cd "$DASH" && PORT="$DASH_PORT" SINGIT_MCP_URL="http://127.0.0.1:$MCP_PORT" exec npm start --silent) &
+  (cd "$DASH" && PORT="$DASH_PORT" SINGIT_BACKEND=mcp-http SINGIT_MCP_URL="http://127.0.0.1:$MCP_PORT" exec npm start --silent) &
   DASH_PID="$!"
   PIDS="$PIDS $DASH_PID"
   echo "  Dashboard:             http://127.0.0.1:$DASH_PORT" >&2

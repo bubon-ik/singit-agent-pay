@@ -10,6 +10,7 @@
   "scripts": {
     "postinstall": "npm --prefix singit-mcp ci --no-audit --no-fund",
     "demo:all": "bash singit-mcp/scripts/demo-all.sh",
+    "live:all": "bash singit-mcp/scripts/live-all.sh",
     "demo": "npm --prefix singit-mcp run demo",
     "test": "npm --prefix singit-mcp test && npm --prefix demo-dashboard run test:e2e",
     "test:mcp": "npm --prefix singit-mcp test",

@@ -2,6 +2,11 @@
 
 Local demo UI for singit-mcp. It shows mandate budgets, escrow holds, audit events, and a human dispute console. It uses plain Node 20 and static HTML/JS.
 
+For configured devnet wallets use [`npm run live:all`](../docs/LIVE-DEMO.md) at the
+repository root. It starts an MCP HTTP bridge with `SINGIT_REQUIRE_DEVNET=1`,
+uses the public payer/merchant addresses for the story, and refuses mock fallback.
+The live story requires confirmation and a separate human dispute decision.
+
 ## Fresh clone
 
 ```sh
@@ -107,4 +112,3 @@ gh release download --repo <repo-org>/<repo> --pattern 'demo.gif' --dir backup/ 
 ```
 
 (or use the release page’s asset links). Then open the playback page with `npm run backup`, or play the file directly with `xdg-open backup/demo.mp4`. The recording is paced for presenters.
-

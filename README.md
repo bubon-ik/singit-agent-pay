@@ -2,7 +2,7 @@
 
 **Agents that pay each other, safely:** an MCP server that lets AI agents hold, capture, release and refund USDC under human-set mandates (budget, per-tx cap, allowed payees, deadlines), with disputes only a human can resolve and a full audit log.
 
-> **Status:** the demo runs on the **mock backend** (in-memory, synthetic data, no keys). The Solana devnet backend (`Capture402Backend`) is implemented and tested locally against the pinned public ABI. [Devnet acceptance](docs/CAPTURE402-DEVNET.md) still requires a verified deployment, explicit provider/keys/funding and separate authorization; PaymentService persistence remains a live MCP blocker. Devnet only, never mainnet.
+> **Status:** the default demo runs on the **mock backend** (in-memory, synthetic data, no keys). The Solana devnet backend (`Capture402Backend`) is implemented and tested locally against the pinned public ABI. The live entrypoint requires a private durable journal and resolves original pending transactions before serving writes. [Devnet acceptance](docs/CAPTURE402-DEVNET.md) still requires a verified deployment, explicit provider/keys/funding and separate authorization. Devnet only, never mainnet.
 
 ## Quickstart
 
@@ -14,6 +14,11 @@ npm run demo:all  # MCP server on :8787 + dashboard on :5173, Ctrl-C stops both
 ```
 
 Then open http://127.0.0.1:5173 and press **▶ Run demo story**. The story is in [docs/DEMO.md](docs/DEMO.md).
+
+For an operator with funded devnet wallets and private configuration, use
+`npm run live:all -- /absolute/path/to/private/devnet.env`.
+[Live demo setup](docs/LIVE-DEMO.md) explains the two wallet roles, startup recovery
+and the separate browser/MCP acceptance. Live mode never falls back to mock.
 
 | URL | What |
 |---|---|

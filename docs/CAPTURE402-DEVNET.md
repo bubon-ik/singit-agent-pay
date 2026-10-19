@@ -157,8 +157,10 @@ in the main-compatible `TxOutcomeQuery`. This adapter returns `executed` only fo
 original finalized success, `failed` only for original finalized error, and
 `pending` for missing history or a legacy journal without its original wire.
 It never returns a terminal `not_found` to PaymentService. The direct evidence
-overload above retains its richer observations. The synchronous factory does not
-silently create or restore a durable journal for the live MCP path.
+overload above retains its richer observations. The synchronous backend factory
+does not create a journal. The MCP entrypoint requires `SINGIT_STATE_DIR`, restores
+the private journal and performs read-only startup reconciliation before serving.
+See [live startup and recovery](LIVE-DEMO.md).
 
 HTTP and dashboard state expose an explicit public operation view. Prepared
 metadata includes only `txSig`, `holdId` and `lastValidBlockHeight`; signed wires,
@@ -184,9 +186,10 @@ remove evidence, or automatically void/refund to compensate for UNKNOWN.
 **Remaining live MCP acceptance gates:** current main supplies PaymentService's
 operation journal, reservations, write serialization and UNKNOWN handling. This
 branch connects that API to the real backend and tests all four operations through
-a durable offline restart. The live entrypoint must still select a private durable
-store and restore/reconcile every pending record before admitting new writes;
-the factory and default in-memory service do not establish those startup gates.
+a durable offline restart. The live entrypoint now selects a private durable store,
+locks its directory and restores/reconciles pending records before admitting writes.
+An unresolved original outcome stops startup. Its startup pass never sends cleanup
+or replacement transactions. Verify this recovery behavior on the operator host.
 Review multi-process custody, post-send persistence failures and dispute cleanup
 separately. Local compatibility and mock MCP E2E are not live economic acceptance.
 
