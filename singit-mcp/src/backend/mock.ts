@@ -42,6 +42,9 @@ export const DEFAULT_MOCK_BALANCES: Record<string, bigint> = {
   "agent:research-bot": 100_000_000n,
   "data-vendor": 20_000_000n,
   "gpu-broker": 20_000_000n,
+  // The dashboard story uses agent:-prefixed seller ids.
+  "agent:data-vendor": 20_000_000n,
+  "agent:gpu-broker": 20_000_000n,
 };
 
 /** Parses SINGIT_MOCK_BALANCES (JSON {"addr":"baseUnits"}) if set, else returns a copy of DEFAULT_MOCK_BALANCES. */
