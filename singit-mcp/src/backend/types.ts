@@ -102,23 +102,67 @@ export interface EscrowStatus {
   refundDeadline: number;
 }
 
+/**
+ * A backend MUST await ctx.onPrepared(p) once it has built+signed the transaction (signature
+ * and, for hold, the payment PDA known) and BEFORE it sends the transaction. The service uses
+ * this to durably record the prepared tx (op.prepared) before the send, so that a lost response
+ * after send can still be reconciled against on-chain truth via getTxOutcome.
+ */
+export interface PreparedTx {
+  txSig: string;
+  holdId?: string;
+  lastValidBlockHeight?: number;
+}
+
+export interface SubmitContext {
+  onPrepared?(p: PreparedTx): void | Promise<void>;
+}
+
+export interface TxOutcomeQuery {
+  kind: "hold" | "capture" | "release" | "refund";
+  txSig: string | null;
+  holdId: string | null;
+  payer: string;
+  /** hold only: used to derive the payment PDA when txSig is unknown. */
+  salt?: string;
+  lastValidBlockHeight?: number;
+}
+
+export type TxOutcome =
+  | { status: "executed"; txSig: string | null; holdId?: string }
+  | { status: "failed"; code?: string }
+  | { status: "not_found" }
+  | { status: "pending" };
+
 export interface PaymentBackend {
   readonly name: string;
   /** No capture402 instruction: mandates are off-chain. May no-op or persist/anchor terms. */
   createMandate(terms: MandateTerms): Promise<{ ref?: string }>;
   /** capture402 `authorize` (tag 0), payer-signed. */
-  hold(req: HoldRequest): Promise<HoldReceipt>;
+  hold(req: HoldRequest, ctx?: SubmitContext): Promise<HoldReceipt>;
   /** capture402 `capture` (tag 2), merchant-signed. */
-  capture(req: CaptureRequest): Promise<TxReceipt>;
+  capture(req: CaptureRequest, ctx?: SubmitContext): Promise<TxReceipt>;
   /** capture402 `void` (tag 3), merchant-signed. */
-  release(req: ReleaseRequest): Promise<TxReceipt>;
+  release(req: ReleaseRequest, ctx?: SubmitContext): Promise<TxReceipt>;
   /** capture402 `refund` (tag 4), merchant-signed. */
-  refund(req: RefundRequest): Promise<TxReceipt>;
+  refund(req: RefundRequest, ctx?: SubmitContext): Promise<TxReceipt>;
   /** Read + decode the Payment account. null if it does not exist. */
   getStatus(holdId: string): Promise<EscrowStatus | null>;
+  /**
+   * Optional. Resolves whether a money-moving call actually executed on-chain, for reconciling
+   * an UNKNOWN op after a lost response / BackendOutcomeUnknown. If absent, the service keeps
+   * the reservation and stays UNKNOWN until an external reconcile or same-key retry supplies
+   * evidence (signature status / account exists). Capture402Backend may omit this for now.
+   */
+  getTxOutcome?(q: TxOutcomeQuery): Promise<TxOutcome>;
 }
 
-/** Thrown by backends. `code` mirrors capture402 facilitator reasons where possible, e.g. "capture_deadline_expired". */
+/**
+ * Thrown by backends. `code` mirrors capture402 facilitator reasons where possible, e.g.
+ * "capture_deadline_expired". `phase: "confirmed_failure"` means the tx landed with an error
+ * (definitely did not move funds as intended). For a possible send with unknown outcome the
+ * backend MUST throw BackendOutcomeUnknown instead — never reclassify that as BackendError.
+ */
 export class BackendError extends Error {
   constructor(
     public readonly code: string,

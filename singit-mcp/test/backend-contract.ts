@@ -326,6 +326,13 @@ export function runBackendContract(
       timeout,
     );
 
+    test("j. BackendError.ambiguous defaults to false, settable via the 3rd ctor arg", () => {
+      const definite = new BackendError("amount", "bad amount");
+      expect(definite.ambiguous).toBe(false);
+      const ambiguous = new BackendError("timeout", "lost response", { ambiguous: true });
+      expect(ambiguous.ambiguous).toBe(true);
+    });
+
     test(
       "k. integration through PaymentService",
       async () => {
@@ -351,6 +358,39 @@ export function runBackendContract(
 
         const dispute = await service.openDispute({ actor: fx.payer, holdId: hold.id, reason: "contract suite check", evidence: [] });
         expect(dispute.status).toBe("open");
+      },
+      timeout,
+    );
+
+    test(
+      "l. onPrepared reports the final txSig before the hold call resolves",
+      async () => {
+        const prepared: Array<{ txSig: string; holdId?: string }> = [];
+        const { captureDeadline, refundDeadline } = deadlines();
+        const receipt = await fx.backend.hold(
+          { payer: fx.payer, mint: DEVNET_USDC_MINT, payee: fx.payee, maximum: fx.unit, captureDeadline, refundDeadline, salt: salt() },
+          {
+            onPrepared: (p) => {
+              prepared.push(p);
+            },
+          },
+        );
+        expect(prepared.length).toBe(1);
+        expect(prepared[0].txSig).toBe(receipt.txSig);
+        expect(prepared[0].txSig.length).toBeGreaterThan(0);
+      },
+      timeout,
+    );
+
+    test(
+      "m. getTxOutcome: executed for a real hold txSig, not_found for an unknown signature",
+      async () => {
+        const { receipt } = await openHold();
+        const outcome = await fx.backend.getTxOutcome({ kind: "hold", txSig: receipt.txSig, holdId: receipt.holdId, payer: fx.payer });
+        expect(outcome.status).toBe("executed");
+
+        const unknown = await fx.backend.getTxOutcome({ kind: "hold", txSig: "not-a-real-signature-ever-issued", holdId: null, payer: fx.payer });
+        expect(unknown.status).toBe("not_found");
       },
       timeout,
     );
