@@ -20,6 +20,8 @@ export interface HttpHandlerOptions {
   service: PaymentService;
   /** "mock" | "devnet" — reported in GET /api/state. */
   backendName: string;
+  /** Validated local runtime identity only; no RPC URL, key path or credential. */
+  paymentProfile?: Readonly<Record<string, unknown>>;
   approvalSecret?: string;
   routeSecret?: string;
   /** Requests/min for the "mcp" bucket (POST/GET/DELETE /mcp, POST /human/resolve, POST /human/reset). Default 120. */
@@ -137,7 +139,7 @@ export function createHttpHandler(opts: HttpHandlerOptions): (req: IncomingMessa
     sendJson(
       res,
       200,
-      { v: 1, backend: backendName, mandates, disputes: service.listDisputes(), audit: service.listAuditLog(), holds, ops: service.listOperations().map(publicOperation) },
+      { v: 1, backend: backendName, ...(opts.paymentProfile ? { profile: opts.paymentProfile } : {}), mandates, disputes: service.listDisputes(), audit: service.listAuditLog(), holds, ops: service.listOperations().map(publicOperation) },
       { "Access-Control-Allow-Origin": "*" },
     );
   }

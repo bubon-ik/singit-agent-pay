@@ -322,6 +322,31 @@ const rateLimit = (statusCode = 429) => new SolanaError(
   { statusCode, message: "SYNTHETIC_PRIVATE_PROVIDER_DETAIL", headers: new Headers({ "Retry-After": "0" }) },
 );
 
+test('public deployment profile requires an explicit upgrade-authority pin and contains no credentials', async () => {
+  expect(f.backend.deploymentProfile(f.payer.address, f.merchant.address)).toBeUndefined();
+  f.config.upgradeAuthority = null;
+  await f.backend.preflight(f.payer.address, f.merchant.address);
+  const profile = f.backend.deploymentProfile(f.payer.address, f.merchant.address)!;
+  expect(profile).toMatchObject({ name: 'devnet', programId: f.config.programId, mint: DEVNET_USDC_MINT,
+    upgradeAuthority: null, deploymentSlot: '42', payer: f.payer.address, merchant: f.merchant.address });
+  expect(JSON.stringify(profile)).not.toContain(f.config.rpcUrl);
+  expect(Object.keys(profile)).not.toContain('payerKeypairPath');
+});
+
+test('upgrade authority drift permanently closes admission before a submission', async () => {
+  f.config.upgradeAuthority = null;
+  await f.backend.preflight(f.payer.address, f.merchant.address);
+  let closed = false;
+  f.backend.onEnvironmentFailure(() => { closed = true; });
+  const data = f.accounts.get(f.config.programDataAddress)!;
+  data.data[12] = 1; enc(f.merchant.address).copy(data.data, 13);
+  await code(f.backend.hold(req()), 'invalid_deployment');
+  expect(closed).toBe(true); expect(f.sent).toHaveLength(0);
+  data.data[12] = 0;
+  await code(f.backend.hold(req()), 'invalid_deployment');
+  expect(f.sent).toHaveLength(0);
+});
+
 test.each(["onPrepared", "retention", "pacing"] as const)(
   "an identity failure observed during %s blocks the prepared original before send",
   async boundary => {
