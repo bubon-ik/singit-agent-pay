@@ -69,5 +69,46 @@ footer{color:var(--mut);font-size:12px;padding:6px 28px 28px}
 .toast.show{opacity:1;transform:translateX(-50%)}
 
 .tx{white-space:nowrap}
+.legend,.hold-h{flex-wrap:wrap;gap:8px}
+.hold-h b,.ev-m,.card-h h2{overflow-wrap:anywhere}
 @media (min-width:1800px){html{zoom:1.15}}
 @media (max-height:760px){.top{padding-top:7px;padding-bottom:7px}.story{padding-top:6px}.presenter{padding:5px 10px;margin-bottom:4px;gap:10px}.stepno{font-size:26px}.keys{margin-top:2px}.grid{padding-top:6px;gap:8px}.card{padding:9px}.card-h{margin-bottom:5px}.meter{margin:7px 0 4px}.kv{margin-top:6px;gap:5px}.kv div{padding:5px}.chips{margin-top:5px}.hold{padding:6px 8px;margin-bottom:4px}.steps{margin:4px 0 3px}.fstep{padding:3px 7px;margin-bottom:2px}.flow{margin:1px 0 3px}.note{margin-bottom:4px;padding:3px 7px}.human{margin-top:5px}}
+
+@media (max-width:1100px){
+  .top{flex-wrap:wrap;gap:12px;padding:14px 20px}
+  .brand{flex:1;min-width:240px}
+  .actions{flex-wrap:wrap;justify-content:flex-end}
+  .grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;padding:16px 20px}
+  .wide,.timeline-card{grid-column:1/-1}
+  .ops{grid-column:1/-1}
+  .timeline-card{grid-row:auto;max-height:560px}
+  .fstep>div:last-child{flex-wrap:wrap;align-items:flex-start}
+  .ft{white-space:normal}
+  .fs{flex-basis:100%;text-align:left}
+  .op{flex-wrap:wrap}
+}
+@media (max-width:680px){
+  .top{align-items:flex-start;padding:12px 16px}
+  .brand{min-width:0}
+  .title{font-size:16px}
+  .sub{max-width:55vw}
+  .actions{width:100%;justify-content:space-between;gap:6px}
+  .story{padding:12px 16px 0}
+  .presenter{flex-wrap:wrap;gap:8px;padding:10px}
+  .stepno{min-width:60px;font-size:28px}
+  .cap{flex:1 1 calc(100% - 72px)}
+  .pctrl{width:100%;flex-wrap:wrap}
+  .pctrl .sel{flex:1;min-width:150px}
+  .pctrl .btn{flex:1}
+  .grid{grid-template-columns:minmax(0,1fr);gap:12px;padding:12px 16px}
+  .wide,.timeline-card{grid-column:auto;grid-row:auto;max-height:none}
+  .card-h{align-items:flex-start;flex-wrap:wrap;gap:8px}
+  .kv{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .nums,.steps{flex-wrap:wrap}
+  .step{flex:1 1 90px}
+  .op{flex-wrap:wrap}
+  .ft{white-space:normal}
+  .fs{text-align:left}
+  .tablewrap{max-height:320px}
+  footer{padding:6px 16px 20px}
+}

@@ -7,26 +7,35 @@
 import { createServer } from "node:http";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { approvalSecretFromEnv } from "./approval.js";
-import { buildBackendFromEnv } from "./backend/factory.js";
 import { mockBalancesFromEnv, MockBackend } from "./backend/mock.js";
 import { createHttpHandler } from "./http.js";
 import { createMcpServer } from "./server.js";
 import { PaymentService } from "./service.js";
+import { createServiceRuntime, StartupError } from "./runtime.js";
 
-const backend = buildBackendFromEnv(process.env);
 const approvalSecret = approvalSecretFromEnv();
 if (!approvalSecret) {
   console.error("WARNING: SINGIT_HUMAN_APPROVAL_SECRET is unset or shorter than 16 chars; resolve_dispute will refuse every call.");
 }
 
-const service = new PaymentService({ backend, approvalSecret });
+let runtime;
+try {
+  runtime = await createServiceRuntime(process.env, { approvalSecret });
+} catch (error) {
+  // Backend/config errors can contain provider credentials or filesystem paths.
+  console.error(error instanceof StartupError ? `${error.code}: ${error.message}` : "MCP startup failed; review private configuration and journal locally");
+  process.exit(1);
+}
+const { service, backendName, close } = runtime;
+process.once("exit", close);
+process.once("SIGINT", () => process.exit(130));
+process.once("SIGTERM", () => process.exit(143));
 
 const useHttp = process.argv.includes("--http") || process.env.SINGIT_MCP_HTTP === "1";
 
 if (useHttp) {
   const host = "127.0.0.1"; // always loopback; expose publicly only via a tunnel/reverse proxy
   const port = Number(process.env.PORT ?? 8787);
-  const backendName = process.env.SINGIT_BACKEND === "capture402" ? "devnet" : "mock";
   const rawRouteSecret = process.env.SINGIT_HUMAN_ROUTE_SECRET;
   const routeSecret = rawRouteSecret && rawRouteSecret.length >= 16 ? rawRouteSecret : undefined;
 

@@ -16,9 +16,12 @@ const SECRET = process.env.SINGIT_HUMAN_APPROVAL_SECRET ?? randomBytes(24).toStr
 process.env.SINGIT_HUMAN_APPROVAL_SECRET = SECRET;
 const U = 1_000_000n;
 const backendMode = process.env.SINGIT_BACKEND ?? (process.env.SINGIT_MCP_URL ? "mcp-http" : "auto");
+const requireDevnet = process.env.SINGIT_REQUIRE_DEVNET === "1";
+if (requireDevnet && backendMode !== "mcp-http") throw Error("Live dashboard requires SINGIT_BACKEND=mcp-http");
 const fallback = { kind: "local", mod: local, issue: local.issueApprovalToken, MockBackend: local.LocalMockBackend, PaymentService: local.LocalPaymentService };
 let impl = fallback, backendNote = "local adapter (adapter/local-service.mjs)", mcpClient = null, remoteCache = { mandates: [], disputes: [], audit: [] };
 let backendConnecting = false;
+let backendFailure = null;
 
 async function loadInProcess() {
   try {
@@ -60,11 +63,14 @@ async function connectMcpHttp() {
         await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`)));
         const stateResponse = await fetch(`${base}/api/state`);
         if (!stateResponse.ok) throw new Error(`/api/state HTTP ${stateResponse.status}`);
-        remoteCache = normalizeRemoteState(await stateResponse.json());
+        const state = await stateResponse.json();
+        if (requireDevnet && state.backend !== "devnet") throw Error("upstream is not devnet");
+        remoteCache = normalizeRemoteState(state);
         mcpClient = client;
         impl = { kind: "mcp-http" };
         backendNote = `MCP HTTP at ${base}`;
         backendConnecting = false;
+        backendFailure = null;
         console.log(`[dashboard] backend: mcp-http (${base})`);
         pollRemoteState(base);
         return;
@@ -77,6 +83,13 @@ async function connectMcpHttp() {
     } while (Date.now() <= deadline);
   }
   backendConnecting = false;
+  if (requireDevnet) {
+    impl = { kind: "mcp-http" };
+    backendFailure = "Devnet MCP unavailable; check its startup output and configuration";
+    backendNote = backendFailure;
+    console.error(`[dashboard] ${backendFailure}`);
+    return;
+  }
   impl = fallback;
   await loadInProcess();
   backendNote = `mcp-http unavailable (${lastReason}); fell back to ${impl.kind === "in-process" ? "in-process" : "local"} mode`;
@@ -114,7 +127,16 @@ function normalizeRemoteState(s = {}) {
   return { backend: s.backend, mandates, holds: Array.isArray(s.holds) ? s.holds.map(normalizeRemoteHold) : [], disputes: Array.isArray(s.disputes) ? s.disputes.map((d) => ({ ...d, refundAmount: d.refundAmount == null ? d.refundAmount : String(d.refundAmount), txRefs: d.txSigs ?? d.txRefs ?? [] })) : [], audit: Array.isArray(s.audit) ? s.audit : [], ...(ops ? { ops } : {}) };
 }
 async function refreshRemoteState(base) {
-  try { const r = await fetch(`${base}/api/state`); if (r.ok) remoteCache = normalizeRemoteState(await r.json()); } catch { /* retain last successful remote snapshot */ }
+  try {
+    const r = await fetch(`${base}/api/state`, { signal: AbortSignal.timeout(5000) });
+    if (!r.ok) throw Error("state unavailable");
+    const state = await r.json();
+    if (requireDevnet && state.backend !== "devnet") throw Error("upstream is not devnet");
+    remoteCache = normalizeRemoteState(state);
+    backendFailure = null;
+  } catch {
+    if (requireDevnet) backendFailure = "Devnet MCP state unavailable; writes paused";
+  }
 }
 async function pollRemoteState(base) {
   for (;;) {
@@ -124,13 +146,20 @@ async function pollRemoteState(base) {
 }
 
 // ---------- state ----------
-const AGENTS = { payer: "agent:research-bot", vendor: "agent:data-vendor", gpu: "agent:gpu-broker", rogue: "agent:unknown-seller" };
+const MOCK_AGENTS = { payer: "agent:research-bot", vendor: "agent:data-vendor", gpu: "agent:gpu-broker", rogue: "agent:unknown-seller" };
+function liveAgents() {
+  const payer = process.env.SINGIT_PAYER_ADDRESS, merchant = process.env.SINGIT_MERCHANT_ADDRESS;
+  const valid = value => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value ?? "");
+  return valid(payer) && valid(merchant) && payer !== merchant
+    ? { payer, vendor: merchant, gpu: merchant, rogue: MOCK_AGENTS.rogue }
+    : null;
+}
 let svc, mandateIds, disputes, story;
 let storyGen = 0;
 function reset() {
   storyGen++;
   if (impl.kind !== "mcp-http") {
-    const backend = new impl.MockBackend({ balances: { [AGENTS.payer]: 100n * U, [AGENTS.vendor]: 20n * U, [AGENTS.gpu]: 20n * U } });
+    const backend = new impl.MockBackend({ balances: { [MOCK_AGENTS.payer]: 100n * U, [MOCK_AGENTS.vendor]: 20n * U, [MOCK_AGENTS.gpu]: 20n * U } });
     svc = new impl.PaymentService({ backend, approvalSecret: SECRET });
     mandateIds = []; disputes = new Map();
   }
@@ -186,6 +215,7 @@ const localTools = {
   async list_audit_log(a = {}) { return svc.listAuditLog({ mandateId: a.mandateId, limit: a.limit }); },
 };
 async function callTool(name, args = {}) {
+  if (backendFailure || backendConnecting) return { ok: false, code: "BACKEND_UNAVAILABLE", message: backendFailure ?? "MCP is connecting" };
   if (impl.kind === "mcp-http") {
     if (!["create_mandate", "hold", "capture", "release", "refund", "open_dispute", "resolve_dispute", "list_audit_log"].includes(name)) return { ok: false, code: "INVALID_INPUT", message: `unknown tool ${name}` };
     try {
@@ -202,6 +232,7 @@ async function callTool(name, args = {}) {
   catch (e) { return { ok: false, code: e.code ?? "ERROR", message: e.message }; }
 }
 async function humanResolve({ disputeId, outcome, refundAmount, human = "kostiantyn" }) {
+  if (backendFailure || backendConnecting) return { ok: false, code: "BACKEND_UNAVAILABLE", message: backendFailure ?? "MCP is connecting" };
   if (impl.kind === "mcp-http") {
     const secret = process.env.SINGIT_HUMAN_ROUTE_SECRET;
     if (!secret) return { ok: false, code: "HUMAN_ROUTE_SECRET_UNSET", message: "SINGIT_HUMAN_ROUTE_SECRET is not set on the dashboard bridge" };
@@ -243,9 +274,10 @@ function snapshot() {
   const ops = impl.kind === "mcp-http" ? remoteCache.ops : (typeof svc.listOperations === "function" ? svc.listOperations() : typeof svc.listOps === "function" ? svc.listOps() : undefined);
   const sigPattern = /^[1-9A-HJ-NP-Za-km-z]{64,90}$/;
   const realSig = audit.some((a) => sigPattern.test(String(a.txSig ?? ""))) || mandates.some((m) => m.holds?.some((h) => [h.lastTxSig, ...(h.txSigs ?? [])].some((r) => sigPattern.test(String(r ?? ""))))) || normalizedDisputes.some((d) => [...(d.txRefs ?? []), ...(d.txSigs ?? [])].some((r) => sigPattern.test(String(r))));
-  const chain = impl.kind === "mcp-http" ? (remoteCache.backend === "devnet" ? "devnet" : "mock") : realSig ? "devnet" : "mock";
+  const chain = backendFailure ? "unavailable" : impl.kind === "mcp-http" ? (remoteCache.backend === "devnet" ? "devnet" : "mock") : realSig ? "devnet" : "mock";
+  const storyBlocker = backendFailure ?? (backendConnecting ? "Waiting for MCP" : chain === "devnet" && !liveAgents() ? "Set the payer and merchant public addresses on the dashboard bridge" : null);
   const escrow = chain === "mock" ? "escrow (mock)" : "on-chain escrow";
-  return { backend: backendConnecting ? "connecting" : impl.kind, chain, backendNote, cluster: CLUSTER, mandates, disputes: normalizedDisputes, timeline, audit, ...(Array.isArray(ops) ? { ops: ops.map(publicOperation) } : {}), story: { ...story, caption: story.caption.replaceAll("{escrow}", escrow) } };
+  return { backend: backendConnecting ? "connecting" : impl.kind, chain, backendNote, storyBlocker, cluster: CLUSTER, mandates, disputes: normalizedDisputes, timeline, audit, ...(Array.isArray(ops) ? { ops: ops.map(publicOperation) } : {}), story: { ...story, caption: story.caption.replaceAll("{escrow}", escrow) } };
 }
 
 // ---------- demo story ----------
@@ -259,18 +291,20 @@ async function waitForNext(gen) {
 async function runStory({ delay = DEFAULT_DELAY_MS, autoApprove = false, mode = "presenter" } = {}) {
   if (story.state !== "idle" || (impl.kind !== "mcp-http" && snapshot().timeline.length > 0)) return { ok: false, code: "NOT_IDLE", message: "Results are on screen — press Reset first" };
   const gen = storyGen, now = Math.floor(Date.now() / 1000); let mandateId, h1, h2, disputeId;
+  const AGENTS = snapshot().chain === "devnet" ? liveAgents() : MOCK_AGENTS;
+  if (!AGENTS) throw Error("Live story requires payer and merchant public addresses");
   const steps = [
-    ["Mandate: 10 USDC, 4 USDC/tx, 2 h", "A human gives research-bot a spending mandate — budget, per-tx cap, expiry, allowed sellers.", async () => { const r = await callTool("create_mandate", { actor: "human:kostiantyn", payer: AGENTS.payer, totalBudget: (10n * U).toString(), perTxCap: (4n * U).toString(), expiresAt: now + 7200, allowedCounterparties: [AGENTS.vendor, AGENTS.gpu], note: "Market research sprint" }); if (!r.ok) throw Error(r.message); mandateId = r.result.mandate?.id ?? r.result.id; }],
-    ["Hold 3 USDC for data-vendor", "The agent buys a dataset: 3 USDC goes into {escrow}, not straight to the seller.", async () => { const r = await callTool("hold", { actor: AGENTS.payer, mandateId, payee: AGENTS.vendor, amount: (3n * U).toString() }); if (r.ok) h1 = pickHoldId(r.result); }],
+    ["Mandate: 10 USDC, 4 USDC/tx, 2 h", snapshot().chain === "devnet" ? "One payer wallet and one merchant wallet; the merchant supplies both dataset and GPU roles." : "A human gives research-bot a spending mandate — budget, per-tx cap, expiry, allowed sellers.", async () => { const r = await callTool("create_mandate", { actor: "human:kostiantyn", payer: AGENTS.payer, totalBudget: (10n * U).toString(), perTxCap: (4n * U).toString(), expiresAt: now + 7200, allowedCounterparties: [...new Set([AGENTS.vendor, AGENTS.gpu])], note: "Market research sprint" }); if (!r.ok) throw Error(r.message); mandateId = r.result.mandate?.id ?? r.result.id; }],
+    ["Hold 3 USDC for data-vendor", "The agent buys a dataset: 3 USDC goes into {escrow}, not straight to the seller.", async () => { const r = await callTool("hold", { actor: AGENTS.payer, mandateId, payee: AGENTS.vendor, amount: (3n * U).toString() }); if (!r.ok) throw Error(`${r.code}: ${r.message}`); h1 = pickHoldId(r.result); if (!h1) throw Error("Hold returned no payment ID"); }],
     ["Data-vendor captures 2.5 USDC", "The seller delivers and captures only what the job actually cost.", async () => callTool("capture", { actor: AGENTS.vendor, holdId: h1, amount: "2500000" })],
     ["0.5 USDC released to payer", "The unused remainder goes back to the payer — and back into the budget.", async () => callTool("release", { actor: AGENTS.vendor, holdId: h1 })],
-    ["Hold 4 USDC for gpu-broker", "Second purchase: a GPU job, held at exactly the per-transaction cap.", async () => { const r = await callTool("hold", { actor: AGENTS.payer, mandateId, payee: AGENTS.gpu, amount: (4n * U).toString() }); if (r.ok) h2 = pickHoldId(r.result); }],
+    ["Hold 4 USDC for gpu-broker", "Second purchase: a GPU job, held at exactly the per-transaction cap.", async () => { const r = await callTool("hold", { actor: AGENTS.payer, mandateId, payee: AGENTS.gpu, amount: (4n * U).toString() }); if (!r.ok) throw Error(`${r.code}: ${r.message}`); h2 = pickHoldId(r.result); if (!h2) throw Error("Hold returned no payment ID"); }],
     ["GPU-broker captures 4 USDC", "The GPU seller captures the full 4 USDC.", async () => callTool("capture", { actor: AGENTS.gpu, holdId: h2, amount: (4n * U).toString() })],
-    ["5 USDC hold → BLOCKED: over per-tx cap", "A single 5 USDC hold breaks the 4 USDC per-transaction cap — refused before any money moves.", async () => callTool("hold", { actor: AGENTS.payer, mandateId, payee: AGENTS.vendor, amount: "5000000" })],
-    ["Unknown seller → BLOCKED", "The agent tries to hold for a seller that isn't on the mandate — refused before any money moves.", async () => callTool("hold", { actor: AGENTS.payer, mandateId, payee: AGENTS.rogue, amount: "1000000" })],
-    ["4 USDC more → BLOCKED: over budget", "Only 3.5 USDC is left, so a 4 USDC hold is blocked — and written to the audit log.", async () => callTool("hold", { actor: AGENTS.payer, mandateId, payee: AGENTS.vendor, amount: (4n * U).toString() })],
+    ["5 USDC hold → BLOCKED: over per-tx cap", "A single 5 USDC hold breaks the 4 USDC per-transaction cap — refused before any money moves.", async () => callTool("hold", { actor: AGENTS.payer, mandateId, payee: AGENTS.vendor, amount: "5000000" }), "OVER_PER_TX_CAP"],
+    ["Unknown seller → BLOCKED", "The agent tries to hold for a seller that isn't on the mandate — refused before any money moves.", async () => callTool("hold", { actor: AGENTS.payer, mandateId, payee: AGENTS.rogue, amount: "1000000" }), "COUNTERPARTY_NOT_ALLOWED"],
+    ["4 USDC more → BLOCKED: over budget", "Only 3.5 USDC is left, so a 4 USDC hold is blocked — and written to the audit log.", async () => callTool("hold", { actor: AGENTS.payer, mandateId, payee: AGENTS.vendor, amount: (4n * U).toString() }), "OVER_BUDGET"],
     ["Data-vendor refunds 0.5 USDC", "A goodwill refund from the seller. Refunds never re-open the budget.", async () => callTool("refund", { actor: AGENTS.vendor, holdId: h1, amount: "500000" })],
-    ["Research-bot opens a dispute", "The GPU job came back empty: the agent disputes it, and the hold is frozen pending a human decision.", async () => { const r = await callTool("open_dispute", { actor: AGENTS.payer, holdId: h2, reason: "GPU job returned empty results", evidence: ["job-7f3a: output.parquet 0 rows", "SLA: non-empty dataset"] }); if (r.ok) disputeId = r.result.dispute?.id ?? r.result.id; }],
+    ["Research-bot opens a dispute", "The GPU job came back empty: the agent disputes it, and the hold is frozen pending a human decision.", async () => { const r = await callTool("open_dispute", { actor: AGENTS.payer, holdId: h2, reason: "GPU job returned empty results", evidence: ["job-7f3a: output.parquet 0 rows", "SLA: non-empty dataset"] }); if (!r.ok) throw Error(`${r.code}: ${r.message}`); disputeId = r.result.dispute?.id ?? r.result.id; if (!disputeId) throw Error("Dispute returned no ID"); }],
     ["Agent tries to settle its own dispute → BLOCKED", "The agent tries to approve its own refund — no token, then a forged token. Both refused: only a human can approve.", async () => {
       for (const approvalToken of ["", "f".repeat(64)]) {
         const r = await callTool("resolve_dispute", { actor: AGENTS.payer, disputeId, outcome: "refund", refundAmount: "4000000", approvalToken });
@@ -279,9 +313,16 @@ async function runStory({ delay = DEFAULT_DELAY_MS, autoApprove = false, mode = 
     }],
   ];
   story = { state: "running", step: 0, total: steps.length + 1, label: "", caption: "", mode, delayMs: delay, paused: false, nextReq: false, nextInMs: null };
-  for (const [label, caption, fn] of steps) { if (gen !== storyGen) return; story.step++; story.label = label; story.caption = caption; await fn(); if (!(await waitForNext(gen))) return; }
+  for (const [label, caption, fn, expectedCode] of steps) {
+    if (gen !== storyGen) return;
+    story.step++; story.label = label; story.caption = caption;
+    const result = await fn();
+    if (expectedCode && (result?.ok !== false || result.code !== expectedCode)) throw Error(`Expected ${expectedCode}; received ${result?.code ?? "success"}`);
+    if (!expectedCode && result?.ok === false) throw Error(`${result.code}: ${result.message}`);
+    if (!(await waitForNext(gen))) return;
+  }
   story.step++; story.state = "awaiting-human"; story.label = `Human decision on dispute ${disputeId}`; story.caption = "No agent can settle this. A human approves or rejects through the human route.";
-  if (autoApprove) { await sleep(Number.isFinite(delay) ? delay : 0); if (gen === storyGen) { await humanResolve({ disputeId, outcome: "refund", refundAmount: (4n * U).toString() }); markDone(); } }
+  if (autoApprove) { await sleep(Number.isFinite(delay) ? delay : 0); if (gen === storyGen) { const result = await humanResolve({ disputeId, outcome: "refund", refundAmount: (4n * U).toString() }); if (!result.ok) throw Error(`${result.code}: ${result.message}`); markDone(); } }
 }
 function markDone() { if (story.state === "awaiting-human") { story.state = "done"; story.label = "Story complete"; story.caption = "Every step, including blocked attempts, is in the audit log."; } }
 const parseDelay = (v) => (v === null || v === "manual" ? Infinity : v === undefined ? DEFAULT_DELAY_MS : Number(v));
@@ -302,7 +343,14 @@ createServer(async (req, res) => {
       reset();
       return json(res, 200, { ok: true });
     }
-    if (req.method === "POST" && url.pathname === "/api/story") { const b = await readBody(req); if (snapshot().backend === "connecting") return json(res, 503, { ok: false, code: "CONNECTING", message: "waiting for singit-mcp" }); if (story.state !== "idle" || (impl.kind !== "mcp-http" && snapshot().timeline.length)) return json(res, 409, { ok: false, code: "NOT_IDLE", message: "Results are on screen — press Reset first" }); runStory({ delay: parseDelay(b.delay), autoApprove: !!b.autoApprove, mode: b.mode ?? "presenter" }).catch((e) => { story.state = "error"; story.label = e.message; }); return json(res, 202, { ok: true }); }
+    if (req.method === "POST" && url.pathname === "/api/story") {
+      const b = await readBody(req), current = snapshot();
+      if (current.storyBlocker) return json(res, 503, { ok: false, code: "BACKEND_UNAVAILABLE", message: current.storyBlocker });
+      if (current.chain === "devnet" && (b.confirmedDevnet !== true || b.autoApprove)) return json(res, 409, { ok: false, code: "DEVNET_CONFIRMATION_REQUIRED", message: "Confirm the 7 USDC gross devnet story; dispute resolution requires a separate human click" });
+      if (story.state !== "idle" || (impl.kind !== "mcp-http" && current.timeline.length)) return json(res, 409, { ok: false, code: "NOT_IDLE", message: "Results are on screen — press Reset first" });
+      runStory({ delay: parseDelay(b.delay), autoApprove: !!b.autoApprove, mode: b.mode ?? "presenter" }).catch((e) => { story.state = "error"; story.label = e.message; });
+      return json(res, 202, { ok: true });
+    }
     if (req.method === "POST" && url.pathname === "/api/story/next") { if (story.state !== "running") return json(res, 200, { ok: false, code: story.state === "awaiting-human" ? "AWAITING_HUMAN" : "NOT_RUNNING" }); story.nextReq = true; return json(res, 200, { ok: true }); }
     if (req.method === "POST" && url.pathname === "/api/story/pause") { const b = await readBody(req); story.paused = b.paused ?? !story.paused; return json(res, 200, { ok: true, paused: story.paused }); }
     if (req.method === "POST" && url.pathname === "/api/story/pace") { const b = await readBody(req); story.delayMs = parseDelay(b.delay); return json(res, 200, { ok: true }); }

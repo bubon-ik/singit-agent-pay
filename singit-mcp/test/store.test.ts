@@ -108,6 +108,19 @@ describe("MemoryStateStore", () => {
 });
 
 describe("FileStateStore", () => {
+  test("repairs an interrupted final line before appending so the next restart can load", () => {
+    const dir = tmpDir();
+    const store = new FileStateStore(dir);
+    store.putMandate({ ...mandate, note: "Привет" });
+    const file = join(dir, "state.jsonl");
+    writeFileSync(file, readFileSync(file, "utf8") + '{"t":"op","v":1,');
+    const recovered = new FileStateStore(dir);
+    expect(recovered.load().mandates[0].note).toBe("Привет");
+    recovered.putHold(hold);
+    const restarted = new FileStateStore(dir).load();
+    expect(restarted.mandates).toHaveLength(1);
+    expect(restarted.holds).toEqual([hold]);
+  });
   test("round-trips through disk: last write per id wins, seqs computed from ids", () => {
     const dir = tmpDir();
     const store = new FileStateStore(dir);
