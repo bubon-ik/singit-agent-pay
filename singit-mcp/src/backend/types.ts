@@ -4,12 +4,18 @@
  * The MCP server (PaymentService) enforces mandates BEFORE calling any of these methods.
  * A backend only moves escrowed testnet USDC; it never decides whether a payment is allowed.
  *
+ * Network: Solana devnet only. Mint: devnet USDC (DEVNET_USDC_MINT). Base/EVM is out of scope.
+ *
  * Units: all amounts are USDC base units (6 decimals) as bigint. 1 USDC = 1_000_000n.
  * Times: unix seconds (number), compared against the chain clock (Clock sysvar) on capture402.
  *
  * Reference implementation: capture402-solana (github.com/starPaw/capture402-solana),
  * src/lib.rs + integration/src/transactions.ts. See INTERFACE.md for the full mapping table.
  */
+
+/** Devnet USDC (Circle). The only mint the service accepts (QA M-2). */
+export const DEVNET_USDC_MINT = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+export const USDC_DECIMALS = 6;
 
 /** Mandate terms as agreed by the human owner of the paying agent. Off-chain in capture402. */
 export interface MandateTerms {
@@ -27,6 +33,8 @@ export interface MandateTerms {
 /** capture402 `authorize` (tag 0). Moves the full `maximum` from payer ATA into the escrow vault. */
 export interface HoldRequest {
   payer: string;
+  /** SPL mint. Must be devnet USDC (DEVNET_USDC_MINT); the program accepts any classic mint (QA M-2). */
+  mint: string;
   /** capture402: `server` — the merchant who later signs capture/void/refund. */
   payee: string;
   /** Immutable on-chain maximum. Must be > 0. */
@@ -42,8 +50,8 @@ export interface HoldRequest {
 export interface HoldReceipt {
   /** capture402: the payment PDA address. Used as the id for every later call. */
   holdId: string;
-  /** Transaction signature (or mock id). */
-  txRef: string;
+  /** Transaction signature (devnet) or mock id. Goes into the audit log (the program emits no logs, QA L-2). */
+  txSig: string;
 }
 
 /**
@@ -75,7 +83,8 @@ export interface RefundRequest extends StateGuard {
 }
 
 export interface TxReceipt {
-  txRef: string;
+  /** Transaction signature (devnet) or mock id. */
+  txSig: string;
 }
 
 /** Decoded capture402 Payment account (176 bytes, discriminator "SACPAY01"). */
@@ -83,6 +92,7 @@ export interface EscrowStatus {
   holdId: string;
   payer: string;
   payee: string;
+  mint: string;
   maximum: bigint;
   /** Still locked in the vault. */
   held: bigint;
