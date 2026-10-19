@@ -20,7 +20,7 @@ const backendMode = process.env.SINGIT_BACKEND ?? (process.env.SINGIT_MCP_URL ? 
 const requireDevnet = process.env.SINGIT_REQUIRE_DEVNET === "1";
 if (requireDevnet && backendMode !== "mcp-http") throw Error("Live dashboard requires SINGIT_BACKEND=mcp-http");
 const fallback = { kind: "local", mod: local, issue: local.issueApprovalToken, MockBackend: local.LocalMockBackend, PaymentService: local.LocalPaymentService };
-let impl = fallback, backendNote = "local adapter (adapter/local-service.mjs)", mcpClient = null, remoteCache = { mandates: [], disputes: [], audit: [] };
+let impl = fallback, backendNote = "local adapter (adapter/local-service.mjs)", mcpClients = null, remoteCache = { mandates: [], disputes: [], audit: [] };
 let backendConnecting = false;
 let backendFailure = null;
 
@@ -58,18 +58,29 @@ async function connectMcpHttp() {
   }
   if (Client && StreamableHTTPClientTransport) {
     do {
-      let client;
+      let clients = [];
       try {
-        client = new Client({ name: "singit-demo-dashboard", version: "1.0.0" });
-        await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`)));
+        // MVP-01: with SINGIT_BUYER_TOKEN + SINGIT_MERCHANT_TOKEN the bridge acts as each agent under its
+        // own principal (the server then refuses role mix-ups); without them it needs the server's
+        // explicit trusted-operator mode.
+        const connect = async (name, token) => {
+          const c = new Client({ name, version: "1.0.0" });
+          clients.push(c);
+          await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), token ? { requestInit: { headers: { Authorization: `Bearer ${token}` } } } : undefined));
+          return c;
+        };
+        const roles = roleTokens();
+        const connected = roles
+          ? { buyer: await connect("singit-demo-dashboard-buyer", roles.buyer), merchant: await connect("singit-demo-dashboard-merchant", roles.merchant) }
+          : { operator: await connect("singit-demo-dashboard") };
         const stateResponse = await fetch(`${base}/api/state`);
         if (!stateResponse.ok) throw new Error(`/api/state HTTP ${stateResponse.status}`);
         const state = await stateResponse.json();
         if (requireDevnet && state.backend !== "devnet") throw Error("upstream is not devnet");
         remoteCache = normalizeRemoteState(state);
-        mcpClient = client;
+        mcpClients = connected;
         impl = { kind: "mcp-http" };
-        backendNote = `MCP HTTP at ${base}`;
+        backendNote = `MCP HTTP at ${base}${roles ? " (per-role agent tokens)" : " (trusted operator)"}`;
         backendConnecting = false;
         backendFailure = null;
         console.log(`[dashboard] backend: mcp-http (${base})`);
@@ -77,7 +88,7 @@ async function connectMcpHttp() {
         return;
       } catch (e) {
         lastReason = safeStartupReason(e);
-        try { await client?.close(); } catch { /* ignore an incomplete MCP handshake */ }
+        for (const c of clients) { try { await c.close(); } catch { /* ignore an incomplete MCP handshake */ } }
       }
       if (Date.now() >= deadline) break;
       await new Promise((resolve) => setTimeout(resolve, Math.min(500, Math.max(0, deadline - Date.now()))));
@@ -215,6 +226,26 @@ const localTools = {
   async resolve_dispute(a) { return svc.resolveDispute({ actor: a.actor, disputeId: a.disputeId, outcome: a.outcome, refundAmount: a.refundAmount == null ? undefined : BigInt(a.refundAmount), approvalToken: a.approvalToken }); },
   async list_audit_log(a = {}) { return svc.listAuditLog({ mandateId: a.mandateId, limit: a.limit }); },
 };
+/** Both agent tokens, or null (then the bridge uses one trusted-operator MCP client). */
+function roleTokens() {
+  const buyer = process.env.SINGIT_BUYER_TOKEN, merchant = process.env.SINGIT_MERCHANT_TOKEN;
+  return buyer && merchant ? { buyer, merchant } : null;
+}
+/** The agent whose principal performs each tool (the payer buys and disputes; the payee settles). */
+const TOOL_ROLE = { hold: "buyer", open_dispute: "buyer", resolve_dispute: "buyer", list_audit_log: "buyer", capture: "merchant", release: "merchant", refund: "merchant" };
+/** Per-role mode: agents can never issue mandates, so the story's mandate goes through the human route. */
+async function humanMandate(args) {
+  const base = (process.env.SINGIT_MCP_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
+  const secret = process.env.SINGIT_HUMAN_ROUTE_SECRET;
+  if (!secret) return { ok: false, code: "HUMAN_ROUTE_SECRET_UNSET", message: "SINGIT_HUMAN_ROUTE_SECRET is not set on the dashboard bridge" };
+  try {
+    const { payer, totalBudget, perTxCap, expiresAt, allowedCounterparties, note } = args;
+    const r = await fetch(base + "/human/mandate", { method: "POST", headers: { "x-singit-human-secret": secret, "content-type": "application/json" }, body: JSON.stringify({ payer, totalBudget, perTxCap, expiresAt, allowedCounterparties, note }) });
+    const data = await r.json().catch(() => ({}));
+    await refreshRemoteState(base);
+    return r.ok && data.ok ? { ok: true, result: { mandate: data.mandate, remaining: data.remaining } } : { ok: false, code: data.code ?? "HUMAN_ROUTE_ERROR", message: data.reason ?? "human mandate route refused the request" };
+  } catch (e) { return { ok: false, code: "HUMAN_ROUTE_ERROR", message: e.message }; }
+}
 async function callTool(name, args = {}) {
   if (backendFailure || backendConnecting) return { ok: false, code: "BACKEND_UNAVAILABLE", message: backendFailure ?? "MCP is connecting" };
   if (impl.kind === "mcp-http") {
@@ -223,7 +254,9 @@ async function callTool(name, args = {}) {
       // Live MCP requires one idempotencyKey per economic intent (MVP-02). Each story step is its own
       // intent and the bridge never retries a step, so a fresh key per call is the honest choice.
       const keyed = ["hold", "capture", "release", "refund"].includes(name) && !args.idempotencyKey ? { ...args, idempotencyKey: `dash-${randomBytes(12).toString("hex")}` } : args;
-      const { structuredContent } = await mcpClient.callTool({ name, arguments: keyed });
+      if (name === "create_mandate" && !mcpClients.operator) return humanMandate(args);
+      const client = mcpClients.operator ?? mcpClients[TOOL_ROLE[name]];
+      const { structuredContent } = await client.callTool({ name, arguments: keyed });
       await refreshRemoteState((process.env.SINGIT_MCP_URL ?? "http://127.0.0.1:8787").replace(/\/$/, ""));
       if (structuredContent?.ok === false) return { ok: false, code: structuredContent.code ?? "ERROR", message: structuredContent.reason ?? "MCP tool failed" };
       if (structuredContent?.ok !== true) return { ok: false, code: "ERROR", message: "MCP tool returned no structured result" };
@@ -312,7 +345,9 @@ async function runStory({ delay = DEFAULT_DELAY_MS, autoApprove = false, mode = 
     ["Agent tries to settle its own dispute → BLOCKED", "The agent tries to approve its own refund — no token, then a forged token. Both refused: only a human can approve.", async () => {
       for (const approvalToken of ["", "f".repeat(64)]) {
         const r = await callTool("resolve_dispute", { actor: AGENTS.payer, disputeId, outcome: "refund", refundAmount: "4000000", approvalToken });
-        if (r.ok || r.code !== "HUMAN_APPROVAL_REQUIRED") throw Error(`expected human approval refusal, received ${r.code ?? "success"}`);
+        // Trusted-operator mode reaches the service (HUMAN_APPROVAL_REQUIRED); with per-role tokens the
+        // agent principal is refused even earlier (PRINCIPAL_FORBIDDEN). Both are audited.
+        if (r.ok || !["HUMAN_APPROVAL_REQUIRED", "PRINCIPAL_FORBIDDEN"].includes(r.code)) throw Error(`expected human approval refusal, received ${r.code ?? "success"}`);
       }
     }],
   ];

@@ -29,7 +29,10 @@ cleanup() {
   wait 2>/dev/null || true
 }
 trap cleanup INT TERM EXIT
-(cd "$ROOT" && PORT="$MCP_PORT" SINGIT_MCP_TRUSTED_OPERATOR="${SINGIT_MCP_TRUSTED_OPERATOR:-1}" exec node --import tsx src/index.ts --http) &
+# MVP-01: with both agent tokens the server enforces per-role principals and the dashboard bridge uses
+# them; the single trusted-operator mode is only the fallback when no tokens are configured.
+if [ -n "${SINGIT_BUYER_TOKEN:-}" ] && [ -n "${SINGIT_MERCHANT_TOKEN:-}" ]; then TRUSTED_DEFAULT=0; else TRUSTED_DEFAULT=1; fi
+(cd "$ROOT" && PORT="$MCP_PORT" SINGIT_MCP_TRUSTED_OPERATOR="${SINGIT_MCP_TRUSTED_OPERATOR:-$TRUSTED_DEFAULT}" exec node --import tsx src/index.ts --http) &
 MCP_PID="$!"
 PIDS="$MCP_PID"
 deadline=$((SECONDS + 45))

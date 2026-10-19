@@ -3,7 +3,7 @@ export function deriveTimeline(audit, mandates) {
   const kinds = { create_mandate: "mandate", hold: "hold", capture: "capture", release: "release", refund: "refund", open_dispute: "dispute", resolve_dispute: "resolve", reset: "reset" };
   return audit.map((a, index) => {
     const failed = a.outcome !== "ok", code = a.code ?? null;
-    const blockedLabels = { OVER_PER_TX_CAP: "over per-tx cap", COUNTERPARTY_NOT_ALLOWED: "counterparty not allowed", OVER_BUDGET: "over budget", HUMAN_APPROVAL_REQUIRED: "human approval required" };
+    const blockedLabels = { OVER_PER_TX_CAP: "over per-tx cap", COUNTERPARTY_NOT_ALLOWED: "counterparty not allowed", OVER_BUDGET: "over budget", HUMAN_APPROVAL_REQUIRED: "human approval required", PRINCIPAL_FORBIDDEN: "not allowed for this agent" };
     const hold = holdById.get(a.holdId);
     const amount = (value) => value == null ? null : `${(Number(value) / 1_000_000).toFixed(2)} USDC`;
     const mandate = mandates.find((m) => m.id === a.mandateId);

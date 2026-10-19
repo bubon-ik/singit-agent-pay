@@ -161,6 +161,17 @@ test("no MCP tool resolves disputes or returns human approval authority", async 
   expect(tools.map((t) => t.name)).not.toContain("approve");
 });
 
+test("refused agent writes are audited with the real principal, and nothing is sent", async () => {
+  const mandateId = (await (await humanMandate(BUYER)).json()).mandate.id;
+  const buyer = await client(BUYER_TOKEN);
+  const holdId = (await call(buyer, "hold", { mandateId, payee: MERCHANT, amount: "1000000" })).hold.id;
+  const before = sends;
+  expect((await call(buyer, "capture", { actor: MERCHANT, holdId, amount: "1000000" })).code).toBe("PRINCIPAL_FORBIDDEN");
+  expect(sends).toBe(before);
+  const merchantView = (await call(await client(MERCHANT_TOKEN), "list_audit_log", { mandateId })).entries;
+  expect(merchantView.at(-1)).toMatchObject({ action: "capture", outcome: "blocked", code: "PRINCIPAL_FORBIDDEN", actor: BUYER, holdId, mandateId });
+});
+
 test("live backend without agent tokens refuses MCP unless the explicit trusted-operator mode is set", async () => {
   const service = new PaymentService({ backend: new MockBackend() });
   const s = createServer(createHttpHandler({ service, backendName: "devnet" }));
