@@ -26,6 +26,8 @@ On first run `demo:all` writes random local dev secrets to `singit-mcp/.env.loca
 
 Other scripts: `npm run demo` (the same story in the terminal), `npm test` (singit-mcp unit + contract tests, then the dashboard e2e), `npm run typecheck`.
 
+Dashboard e2e on its own: `(cd singit-mcp && npm ci)`, then `cd demo-dashboard && npm run test:e2e` (in-process, imports `../singit-mcp/src`). Without singit-mcp's deps: `SINGIT_BACKEND=local npm run test:e2e` (built-in local adapter).
+
 ## Connect an MCP client
 
 **Streamable HTTP (recommended):** start the server with `npm run start:http` (or `npm run demo:all`), then point the client at `http://127.0.0.1:8787/mcp`. The human approval secret stays in the server process, out of the agent's config.
