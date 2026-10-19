@@ -163,7 +163,7 @@ export function createHttpHandler(opts: HttpHandlerOptions): (req: IncomingMessa
       return;
     }
     const body = parsed as Record<string, unknown>;
-    const { disputeId, outcome, refundAmount: refundAmountRaw, actor, approvalToken: forgedToken } = body;
+    const { disputeId, outcome, refundAmount: refundAmountRaw, actor, approvalToken: suppliedToken } = body;
     if (typeof disputeId !== "string" || !disputeId || (outcome !== "refund" && outcome !== "reject")) {
       sendJson(res, 400, { ok: false, code: "INVALID_INPUT", reason: 'disputeId (string) and outcome ("refund"|"reject") are required' });
       return;
@@ -180,17 +180,16 @@ export function createHttpHandler(opts: HttpHandlerOptions): (req: IncomingMessa
       }
     }
 
+    if (!checkHumanRouteSecret(req, res, routeSecret)) return;
+
     let approvalToken: string | undefined;
-    if (typeof forgedToken === "string" && forgedToken) {
+    if (typeof suppliedToken === "string" && suppliedToken) {
       // Token from `npm run approve` is itself the proof; pass it through as-is.
-      approvalToken = forgedToken;
-    } else {
-      if (!checkHumanRouteSecret(req, res, routeSecret)) return;
-      if (approvalSecret) {
-        approvalToken = issueApprovalToken(approvalSecret, { disputeId, outcome, refundAmount: refundAmount ?? 0n });
-      }
-      // else: no approvalSecret configured; let the service refuse with HUMAN_APPROVAL_REQUIRED.
+      approvalToken = suppliedToken;
+    } else if (approvalSecret) {
+      approvalToken = issueApprovalToken(approvalSecret, { disputeId, outcome, refundAmount: refundAmount ?? 0n });
     }
+    // else: no approvalSecret configured; let the service refuse with HUMAN_APPROVAL_REQUIRED.
 
     try {
       const dispute = await service.resolveDispute({

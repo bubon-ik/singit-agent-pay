@@ -197,18 +197,57 @@ test("/human/resolve: valid header resolves the dispute and audits as human-appr
   }
 });
 
-test("/human/resolve: forged approvalToken with no header -> 409 HUMAN_APPROVAL_REQUIRED", async () => {
+test("/human/resolve: approvalToken with no header -> 401 HUMAN_AUTH_REQUIRED", async () => {
+  const { server, service, base } = await startServer();
+  try {
+    const { disputeId } = await openDisputeOn(service, "payee-2");
+    const validToken = issueApprovalToken(APPROVAL_SECRET, { disputeId, outcome: "reject", refundAmount: 0n });
+    const res = await fetch(`${base}/human/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ disputeId, outcome: "reject", approvalToken: validToken }),
+    });
+    expect(res.status).toBe(401);
+    expect((await res.json()).code).toBe("HUMAN_AUTH_REQUIRED");
+    expect(service.getDispute(disputeId).status).toBe("open");
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("/human/resolve: forged approvalToken WITH valid route secret -> 409 HUMAN_APPROVAL_REQUIRED", async () => {
   const { server, service, base } = await startServer();
   try {
     const { disputeId } = await openDisputeOn(service, "payee-2");
     const forgedToken = issueApprovalToken("not-the-real-secret-at-all", { disputeId, outcome: "reject", refundAmount: 0n });
     const res = await fetch(`${base}/human/resolve`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-singit-human-secret": ROUTE_SECRET },
       body: JSON.stringify({ disputeId, outcome: "reject", approvalToken: forgedToken }),
     });
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe("HUMAN_APPROVAL_REQUIRED");
+    expect(service.getDispute(disputeId).status).toBe("open");
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("/human/resolve: valid approvalToken WITH valid route secret -> 200 resolved", async () => {
+  const { server, service, base } = await startServer();
+  try {
+    const { disputeId } = await openDisputeOn(service, "payee-2");
+    const validToken = issueApprovalToken(APPROVAL_SECRET, { disputeId, outcome: "reject", refundAmount: 0n });
+    const res = await fetch(`${base}/human/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-singit-human-secret": ROUTE_SECRET },
+      body: JSON.stringify({ disputeId, outcome: "reject", approvalToken: validToken }),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.ok).toBe(true);
+    expect(json.dispute.status).toBe("resolved");
+    expect(service.getDispute(disputeId).status).toBe("resolved");
   } finally {
     await closeServer(server);
   }
