@@ -3,4 +3,6 @@ node_modules/
 .env.*
 *.log
 screenshots/*.tmp.png
-# backup/demo.mp4 (~3.5 MB) and backup/demo.gif (~4.6 MB) are under 20 MB, so they are committed on purpose
+# Backup media (backup/demo.mp4, backup/demo.gif) is kept out of git and published as a GitHub release asset instead.
+backup/*.mp4
+backup/*.gif

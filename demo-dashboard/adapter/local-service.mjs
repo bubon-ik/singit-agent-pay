@@ -11,7 +11,9 @@ export class Refusal extends Error {
 
 export const formatUsdc = (b) => {
   const neg = b < 0n; const v = neg ? -b : b;
-  return `${neg ? "-" : ""}${v / 1_000_000n}.${(v % 1_000_000n).toString().padStart(6, "0")} USDC`;
+  let frac = (v % 1_000_000n).toString().padStart(6, "0");
+  while (frac.length > 2 && frac.endsWith("0")) frac = frac.slice(0, -1);
+  return `${neg ? "-" : ""}${v / 1_000_000n}.${frac} USDC`;
 };
 
 export function issueApprovalToken(secret, { disputeId, outcome, refundAmount }) {

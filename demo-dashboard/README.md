@@ -91,5 +91,14 @@ Real Solana signatures are linked to the devnet explorer. Mock transaction refer
 
 ## Backup recording
 
-Open the backup playback page with `npm run backup`, or play `backup/demo.mp4` directly with `xdg-open backup/demo.mp4`. The 13-step story recording is paced for presenters. A GIF version is available at `backup/demo.gif`.
+The 13-step story recording lives in `backup/demo.mp4` (with a `backup/demo.gif` GIF version). It is **not in git** — the files are kept out of the repo and published as a GitHub release asset instead, so a fresh clone won’t have them locally.
+
+If `backup/demo.mp4` is missing, download the media from the GitHub release assets into `backup/` (the release and its tag will be set when the release is created; until then the media is not published):
+
+```sh
+gh release download --repo bubon-ik/singit-agent-pay --pattern 'demo.mp4' --dir backup/
+gh release download --repo bubon-ik/singit-agent-pay --pattern 'demo.gif' --dir backup/   # optional GIF
+```
+
+(or use the release page’s asset links). Then open the playback page with `npm run backup`, or play the file directly with `xdg-open backup/demo.mp4`. The recording is paced for presenters.
 
