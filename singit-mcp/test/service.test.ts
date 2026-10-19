@@ -251,6 +251,69 @@ test("open_dispute freezes capture (DISPUTE_OPEN) (QA H-1)", async () => {
   await expectRefused(service.capture({ actor: PAYEE, holdId: hold.id, amount: 100_000n }), "DISPUTE_OPEN");
 });
 
+test("open_dispute succeeds just before the refund deadline", async () => {
+  const { service, now, advance } = setup();
+  const mandate = await createMandate(service, { expiresAt: now() + 100_000 });
+  const hold = await service.hold({
+    actor: PAYER,
+    mandateId: mandate.id,
+    payee: PAYEE,
+    amount: 500_000n,
+    captureDeadline: now() + 1000,
+    refundDeadline: now() + 1000 + 3600,
+  });
+
+  advance(hold.refundDeadline - now() - 1);
+  const dispute = await service.openDispute({ actor: PAYER, holdId: hold.id, reason: "not delivered", evidence: [] });
+  expect(dispute.status).toBe("open");
+});
+
+test("open_dispute at exactly the refund deadline -> REFUND_WINDOW_CLOSED", async () => {
+  const { service, now, advance } = setup();
+  const mandate = await createMandate(service, { expiresAt: now() + 100_000 });
+  const hold = await service.hold({
+    actor: PAYER,
+    mandateId: mandate.id,
+    payee: PAYEE,
+    amount: 500_000n,
+    captureDeadline: now() + 1000,
+    refundDeadline: now() + 1000 + 3600,
+  });
+
+  advance(hold.refundDeadline - now());
+  await expectRefused(
+    service.openDispute({ actor: PAYER, holdId: hold.id, reason: "not delivered", evidence: [] }),
+    "REFUND_WINDOW_CLOSED",
+  );
+  expect(service.listDisputes()).toEqual([]);
+
+  const entries = service.listAuditLog({ mandateId: mandate.id });
+  const last = entries[entries.length - 1];
+  expect(last.action).toBe("open_dispute");
+  expect(last.outcome).toBe("blocked");
+  expect(last.code).toBe("REFUND_WINDOW_CLOSED");
+});
+
+test("open_dispute after the refund deadline -> REFUND_WINDOW_CLOSED", async () => {
+  const { service, now, advance } = setup();
+  const mandate = await createMandate(service, { expiresAt: now() + 100_000 });
+  const hold = await service.hold({
+    actor: PAYER,
+    mandateId: mandate.id,
+    payee: PAYEE,
+    amount: 500_000n,
+    captureDeadline: now() + 1000,
+    refundDeadline: now() + 1000 + 3600,
+  });
+
+  advance(hold.refundDeadline - now() + 10);
+  await expectRefused(
+    service.openDispute({ actor: PAYER, holdId: hold.id, reason: "not delivered", evidence: [] }),
+    "REFUND_WINDOW_CLOSED",
+  );
+  expect(service.listDisputes()).toEqual([]);
+});
+
 test("resolve_dispute requires a valid human approval token (QA H-1)", async () => {
   const { service, now } = setup();
   const mandate = await createMandate(service, { expiresAt: now() + 1000 });

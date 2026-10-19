@@ -596,6 +596,9 @@ export class PaymentService {
       const hold = this.holds.get(holdId);
       if (!hold) throw new Refusal("HOLD_NOT_FOUND", `BLOCKED: hold not found: ${holdId}`);
       if (actor !== hold.payer) throw new Refusal("NOT_PAYER", `BLOCKED: ${actor} is not the payer of hold ${holdId}`);
+      if (this.now() >= hold.refundDeadline) {
+        throw new Refusal("REFUND_WINDOW_CLOSED", `BLOCKED: refund window closed for hold ${holdId}, dispute could never be refunded`);
+      }
       if (!reason) throw new Refusal("INVALID_INPUT", "BLOCKED: dispute reason must be non-empty");
       if (hold.disputeId && this.disputes.get(hold.disputeId)?.status === "open") {
         throw new Refusal("DISPUTE_OPEN", `BLOCKED: hold ${holdId} already has an open dispute`);

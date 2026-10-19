@@ -23,6 +23,7 @@ export const RefusalCodes = [
   "NOTHING_HELD",
   "REFUND_EXCEEDS_CAPTURED",
   "REFUND_DEADLINE_PASSED",
+  "REFUND_WINDOW_CLOSED", // open_dispute: now >= hold.refundDeadline, same boundary as refund
   "DISPUTE_OPEN",
   "DISPUTE_NOT_FOUND",
   "DISPUTE_ALREADY_RESOLVED",
