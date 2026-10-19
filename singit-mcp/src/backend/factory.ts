@@ -13,13 +13,13 @@ export function assertDevnetRpc(url: string): void {
   try {
     parsed = new URL(url);
   } catch {
-    throw new BackendError("invalid_network", `invalid RPC URL: ${url}`);
+    throw new BackendError("invalid_network", "invalid RPC URL (SINGIT_RPC_URL)");
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new BackendError("invalid_network", `RPC URL must be http(s): ${url}`);
+    throw new BackendError("invalid_network", "RPC URL must be http(s) (SINGIT_RPC_URL)");
   }
   if (parsed.hostname.toLowerCase().includes("mainnet")) {
-    throw new BackendError("invalid_network", `refusing mainnet RPC URL: ${url}`);
+    throw new BackendError("invalid_network", `refusing mainnet RPC URL (host ${parsed.hostname})`);
   }
 }
 
