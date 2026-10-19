@@ -63,3 +63,35 @@ Schema: `AuditEntry` in [`src/audit.ts`](src/audit.ts). Fields are only ever add
 **TS helpers to reuse** (capture402 `integration/src`): `authorizeInstruction`, `captureInstruction`, `voidInstruction`, `refundInstruction` (transactions.ts), and `paymentAddress`, `ata`, `decodePayment` (program.ts).
 
 Devnet/test keys only. Never real keys. Never commit keypairs.
+
+## MCP tools (schemas: `toolSchemas` in [`src/server.ts`](src/server.ts), zod)
+
+Amounts are base-unit decimal strings (`"2500000"` = 2.5 USDC). Times are integer unix seconds. Every write takes `actor`, the calling agent's id/address. The audit `action` is exactly the tool name. **`hold` is the pay tool**; there is no separate `pay`.
+
+| Tool | Args | Returns (`ok: true`) |
+|---|---|---|
+| `create_mandate` | `actor, payer, totalBudget, perTxCap, expiresAt, allowedCounterparties[], note?` | `mandate, remaining` |
+| `get_mandate` | `mandateId` | `mandate, remaining, holds[]` |
+| `list_mandates` | – | `mandates: [{mandate, remaining, holds}]` |
+| `hold` | `actor, mandateId, payee, amount, mint?, captureDeadline?, refundDeadline?` | `hold, txSig, remaining` |
+| `capture` | `actor, holdId, amount, releaseRemainder?` | `hold, txSig` |
+| `release` | `actor, holdId` | `hold, txSig` |
+| `refund` | `actor, holdId, amount` | `hold, txSig` |
+| `open_dispute` | `actor, holdId, reason, evidence[]` | `dispute` |
+| `list_disputes` | `status? ("open"\|"resolved"), mandateId?` | `disputes[]` |
+| `resolve_dispute` | `actor, disputeId, outcome ("refund"\|"reject"), refundAmount?, approvalToken` | `dispute, txSig` (null for reject) |
+| `list_audit_log` | `mandateId?, limit?` | `entries: AuditEntry[]` |
+
+- **Refusal:** `isError: true`, `{ok: false, code, reason}`. The same object is in `structuredContent` and as JSON text in `content`.
+- **Hold object:** `id, mandateId, payer, payee, mint, maximum, held, captured, refunded, captureDeadline, refundDeadline, txSigs[], lastTxSig, disputeId?`.
+- **txSig / txRef:** a devnet signature (explorer: `https://explorer.solana.com/tx/<sig>?cluster=devnet`), or `mock-tx-N` from MockBackend. It appears in the tool result, in `hold.txSigs`/`lastTxSig`, in `dispute.txSigs`, and in the audit `txSig`.
+- **Approval token:** `issueApprovalToken(secret, {disputeId, outcome, refundAmount})` in `src/approval.ts`. It is HMAC-SHA256 over `singit-dispute-v1|disputeId|outcome|amount`, and the amount is forced to 0 for `reject`. CLI: `SINGIT_HUMAN_APPROVAL_SECRET=… npm run approve -- d-1 refund 2500000`.
+
+## Transports
+- stdio (default): `npx tsx src/index.ts`
+- streamable HTTP: `--http` or `SINGIT_MCP_HTTP=1`. Binds `127.0.0.1`, **port 8787** (override with `PORT`), path `/mcp`, `GET /health`. Stateless, with one shared in-memory state per process.
+- Backend: `SINGIT_BACKEND=mock` (default) or `capture402` (stub, uses `SINGIT_RPC_URL`, `SINGIT_PROGRAM_ID`). `SINGIT_MOCK_BALANCES='{"buyer-agent":"100000000"}'`.
+
+## In-process use (dashboard)
+`import { PaymentService } from "src/service.ts"`, `{ MockBackend } from "src/backend/mock.ts"`, `{ issueApprovalToken } from "src/approval.ts"`.
+`new PaymentService({ backend, now?, approvalSecret?, mint? })`. Write methods (`createMandate, hold, capture, release, refund, openDispute, resolveDispute`) are async, take bigint amounts and throw `Refusal {code, message}`. Reads are sync: `getMandate(id)` (throws if missing), `listMandates()`, `listDisputes({status?, mandateId?})`, `getHold(id)`, `getDispute(id)`, `listAuditLog({mandateId?, limit?})`.
