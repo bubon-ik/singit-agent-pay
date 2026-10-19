@@ -85,7 +85,7 @@ Amounts are USDC base units as decimal strings (`2500000` = 2.5 USDC); times are
 | `get_operation` | Read-only status of one payment operation after a lost response or UNKNOWN |
 | `list_audit_log` | Every action, including blocked ones |
 
-Full schemas, refusal codes and the backend contract: [docs/INTERFACE.md](docs/INTERFACE.md). Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Full schemas, refusal codes and the backend contract: [docs/INTERFACE.md](docs/INTERFACE.md). Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Release gate and current Go/No-Go: [docs/RELEASE-GATE.md](docs/RELEASE-GATE.md). Operator runbook: [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
 ## Repository layout
 
@@ -93,7 +93,7 @@ Full schemas, refusal codes and the backend contract: [docs/INTERFACE.md](docs/I
 |---|---|
 | `singit-mcp/` | The MCP server: mandate engine, `PaymentBackend` (mock + Capture402 devnet implementation), human approval, audit log, tests |
 | `demo-dashboard/` | Zero-dependency web dashboard that plays the demo story against singit-mcp |
-| `docs/` | Architecture, interface, demo story |
+| `docs/` | Architecture, interface, demo story, release gate, runbook |
 
 ## Built during the hackathon
 
