@@ -59,7 +59,7 @@ export interface AuditEntry {
   outcome: "ok" | "blocked" | "error";
   /** RefusalCode when outcome != "ok", else null. */
   code: RefusalCode | null;
-  /** Human-readable explanation, e.g. "BLOCKED: over budget: hold 3.000000 USDC but only 1.500000 USDC remains". */
+  /** Human-readable explanation, e.g. "BLOCKED: over budget: hold 3.00 USDC but only 1.50 USDC remains". */
   reason: string;
   mandateId: string | null;
   holdId: string | null;

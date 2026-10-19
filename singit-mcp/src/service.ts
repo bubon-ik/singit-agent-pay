@@ -295,7 +295,7 @@ export class PaymentService {
         "ok",
         null,
         `created mandate ${id} for payer ${payer}: budget ${formatUsdc(totalBudget)}, per-tx cap ${formatUsdc(perTxCap)}`,
-        { mandateId: id, txSig: result.ref ?? null },
+        { mandateId: id, txSig: result.ref ?? null, amount: totalBudget },
       );
       return mandate;
     } catch (err) {

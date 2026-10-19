@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DASH="$(cd "$ROOT/.." && pwd)/demo-dashboard"
 MCP_PORT="${MCP_PORT:-8787}"
 DASH_PORT="${DASH_PORT:-5173}"
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-20}"
 die() { echo "demo:all: $*" >&2; exit 1; }
 
 # 1. Node version
@@ -50,32 +51,58 @@ if [ "$HAVE_DASH" = 1 ]; then
   port_busy "$DASH_PORT" && die "port $DASH_PORT is in use (dashboard). Free it or run: DASH_PORT=5174 npm run demo:all"
 fi
 
-# 5. Start both; Ctrl-C / exit stops both
+# 5. Start MCP server first; Ctrl-C / exit stops all
 PIDS=""
 killtree() { local c; for c in $(pgrep -P "$1" 2>/dev/null); do killtree "$c"; done; kill -TERM "$1" 2>/dev/null || true; }
 cleanup() { trap - INT TERM EXIT; for p in $PIDS; do killtree "$p"; done; wait 2>/dev/null || true; echo "demo:all: stopped." >&2; }
 trap cleanup INT TERM EXIT
 
 (cd "$ROOT" && PORT="$MCP_PORT" exec ./node_modules/.bin/tsx src/index.ts --http) &
-PIDS="$!"
-if [ "$HAVE_DASH" = 1 ]; then
-  (cd "$DASH" && PORT="$DASH_PORT" SINGIT_MCP_URL="http://127.0.0.1:$MCP_PORT" exec npm start --silent) &
-  PIDS="$PIDS $!"
+MCP_PID="$!"
+PIDS="$MCP_PID"
+
+# wait for health with timeout check
+HEALTH_POLL_INTERVAL=0.25
+[[ "$HEALTH_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || die "HEALTH_TIMEOUT must be a positive integer"
+deadline=$((SECONDS + HEALTH_TIMEOUT))
+healthy=0
+while :; do
+  if ! kill -0 "$MCP_PID" 2>/dev/null; then
+    die "MCP server exited before /health was OK (see output above)"
+  fi
+
+  if node -e 'fetch(process.argv[1]).then(r=>process.exit(r.ok?0:1),()=>process.exit(1))' "http://127.0.0.1:$MCP_PORT/health" 2>/dev/null; then
+    healthy=1
+    break
+  fi
+
+  if (( SECONDS >= deadline )); then
+    break
+  fi
+
+  sleep "$HEALTH_POLL_INTERVAL"
+done
+
+if (( ! healthy )); then
+  die "MCP server did not become healthy on http://127.0.0.1:$MCP_PORT/health within ${HEALTH_TIMEOUT}s (see output above)"
 fi
 
-# wait for health
-for _ in $(seq 1 40); do
-  node -e 'fetch(process.argv[1]).then(r=>process.exit(r.ok?0:1),()=>process.exit(1))' "http://127.0.0.1:$MCP_PORT/health" && break
-  sleep 0.25
-done
 echo "" >&2
 echo "  MCP (streamable HTTP): http://127.0.0.1:$MCP_PORT/mcp" >&2
 echo "  State (JSON):          http://127.0.0.1:$MCP_PORT/api/state" >&2
-[ "$HAVE_DASH" = 1 ] && echo "  Dashboard:             http://127.0.0.1:$DASH_PORT" >&2
+
+# Start dashboard if available (only after MCP is healthy)
+if [ "$HAVE_DASH" = 1 ]; then
+  (cd "$DASH" && PORT="$DASH_PORT" SINGIT_MCP_URL="http://127.0.0.1:$MCP_PORT" exec npm start --silent) &
+  DASH_PID="$!"
+  PIDS="$PIDS $DASH_PID"
+  echo "  Dashboard:             http://127.0.0.1:$DASH_PORT" >&2
+fi
+
 echo "  Ctrl-C to stop." >&2
 echo "" >&2
 
-# exit when either process exits
+# exit when any process exits
 while :; do
   for p in $PIDS; do kill -0 "$p" 2>/dev/null || { echo "demo:all: a process exited; stopping." >&2; exit 1; }; done
   sleep 1
