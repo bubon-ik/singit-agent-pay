@@ -8,6 +8,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { AmountError, parseUsdc } from "./amount.js";
 import type { Principal } from "./principal.js";
+import { publicOperation } from "./public-state.js";
 import { type Mandate, PaymentService, Refusal } from "./service.js";
 
 type GuardedAction = "hold" | "capture" | "release" | "refund" | "open_dispute";
@@ -93,13 +94,13 @@ function toResult(obj: Record<string, unknown>, isError = false): CallToolResult
 }
 
 /** Runs a tool body; converts Refusal/AmountError into the refusal result shape instead of throwing. */
-async function run(fn: () => Promise<Record<string, unknown>>): Promise<CallToolResult> {
+async function run(fn: () => Promise<object>): Promise<CallToolResult> {
   try {
     const data = await fn();
     return toResult({ ok: true, ...data });
   } catch (err) {
     if (err instanceof Refusal) {
-      return toResult({ ok: false, code: err.code, reason: err.message }, true);
+      return toResult({ ok: false, code: err.code, reason: err.message, operationId: err.operationId }, true);
     }
     if (err instanceof AmountError) {
       return toResult({ ok: false, code: "INVALID_INPUT", reason: err.message }, true);
@@ -117,6 +118,13 @@ const mandateId = z.string().describe("Mandate id, e.g. m-1.");
 const holdId = z.string().describe("Hold id (capture402 payment PDA, or a mock id).");
 const disputeId = z.string().describe("Dispute id, e.g. d-1.");
 const unixSeconds = z.number().int().describe("Unix seconds (not milliseconds).");
+const idempotencyKey = z
+  .string()
+  .optional()
+  .describe(
+    "Stable id for this one payment intent, 1-128 chars of [A-Za-z0-9._:-]. Generate it once and resend it UNCHANGED on every retry " +
+      "(lost response, timeout, restart): the server then returns the original outcome instead of paying again. Required on the live backend.",
+  );
 
 export const toolSchemas = {
   create_mandate: {
@@ -140,21 +148,25 @@ export const toolSchemas = {
     mint: z.string().optional().describe("SPL mint; defaults to and must equal devnet USDC."),
     captureDeadline: unixSeconds.optional().describe("Defaults to min(mandate.expiresAt, now + 7 days)."),
     refundDeadline: unixSeconds.optional().describe("Defaults to captureDeadline + 24h; must be 1h-30d after captureDeadline."),
+    idempotencyKey,
   },
   capture: {
     actor,
     holdId,
     amount: amount.describe("Amount to capture, base units; must be <= held."),
     releaseRemainder: z.boolean().optional().describe("If true, return any uncaptured remainder to the payer in the same call."),
+    idempotencyKey,
   },
   release: {
     actor,
     holdId,
+    idempotencyKey,
   },
   refund: {
     actor,
     holdId,
     amount: amount.describe("Amount to refund, base units; must be <= captured - already refunded."),
+    idempotencyKey,
   },
   open_dispute: {
     actor,
@@ -176,6 +188,10 @@ export const toolSchemas = {
       .describe(
         "Human approval token for this exact decision, issued out-of-band by `npm run approve` (never by any MCP tool).",
       ),
+    idempotencyKey,
+  },
+  get_operation: {
+    operationId: z.string().describe("Operation id from a hold/capture/release/refund result or refusal, e.g. op-3."),
   },
   list_audit_log: {
     mandateId: mandateId.optional(),
@@ -243,7 +259,7 @@ export function createMcpServer(service: PaymentService, principal?: Principal):
     },
     (args) =>
       run(async () => {
-        const hold = await service.hold({
+        const outcome = await service.holdOp({
           actor: guard.actorFor("hold", args.actor, { mandateId: args.mandateId }),
           mandateId: args.mandateId,
           payee: args.payee,
@@ -251,9 +267,10 @@ export function createMcpServer(service: PaymentService, principal?: Principal):
           mint: args.mint,
           captureDeadline: args.captureDeadline,
           refundDeadline: args.refundDeadline,
+          idempotencyKey: args.idempotencyKey,
         });
-        const { remaining } = service.getMandate(hold.mandateId);
-        return { hold, txSig: hold.lastTxSig, remaining };
+        const { remaining } = service.getMandate(outcome.hold.mandateId);
+        return { ...outcome, remaining };
       }),
   );
 
@@ -265,13 +282,13 @@ export function createMcpServer(service: PaymentService, principal?: Principal):
     },
     (args) =>
       run(async () => {
-        const hold = await service.capture({
+        return service.captureOp({
           actor: guard.actorFor("capture", args.actor, { holdId: args.holdId }),
           holdId: args.holdId,
           amount: parseUsdc(args.amount),
           releaseRemainder: args.releaseRemainder,
+          idempotencyKey: args.idempotencyKey,
         });
-        return { hold, txSig: hold.lastTxSig };
       }),
   );
 
@@ -283,8 +300,11 @@ export function createMcpServer(service: PaymentService, principal?: Principal):
     },
     (args) =>
       run(async () => {
-        const hold = await service.release({ actor: guard.actorFor("release", args.actor, { holdId: args.holdId }), holdId: args.holdId });
-        return { hold, txSig: hold.lastTxSig };
+        return service.releaseOp({
+          actor: guard.actorFor("release", args.actor, { holdId: args.holdId }),
+          holdId: args.holdId,
+          idempotencyKey: args.idempotencyKey,
+        });
       }),
   );
 
@@ -298,19 +318,21 @@ export function createMcpServer(service: PaymentService, principal?: Principal):
     },
     (args) =>
       run(async () => {
-        const hold = await service.refund({
+        return service.refundOp({
           actor: guard.actorFor("refund", args.actor, { holdId: args.holdId }),
           holdId: args.holdId,
           amount: parseUsdc(args.amount),
+          idempotencyKey: args.idempotencyKey,
         });
-        return { hold, txSig: hold.lastTxSig };
       }),
   );
 
   server.registerTool(
     "open_dispute",
     {
-      description: "Open a dispute on a hold. Caller must be the hold's payer. Freezes further captures until resolved.",
+      description:
+        "Open a dispute on a hold. Caller must be the hold's payer. This service then refuses captures until a human resolves it; " +
+        "it is not an on-chain freeze and does not guarantee a refund.",
       inputSchema: toolSchemas.open_dispute,
     },
     (args) =>
@@ -352,9 +374,26 @@ export function createMcpServer(service: PaymentService, principal?: Principal):
           outcome: args.outcome,
           refundAmount: args.refundAmount !== undefined ? parseUsdc(args.refundAmount) : undefined,
           approvalToken: args.approvalToken,
+          idempotencyKey: args.idempotencyKey,
         });
         const txSig = dispute.txSigs.length > 0 ? dispute.txSigs[dispute.txSigs.length - 1] : null;
         return { dispute, txSig };
+      }),
+  );
+
+  server.registerTool(
+    "get_operation",
+    {
+      description:
+        "Read-only status of one economic operation (pending/unknown/succeeded/failed) by the operationId a write or refusal returned. " +
+        "Use it after a lost response or OPERATION_UNKNOWN instead of paying again. Signed wires and private evidence are never returned.",
+      inputSchema: toolSchemas.get_operation,
+    },
+    (args) =>
+      run(async () => {
+        const op = service.getOperation(args.operationId);
+        if (guard.filterByMandate([op]).length === 0) throw new Refusal("PRINCIPAL_FORBIDDEN", "operation belongs to another principal");
+        return { operation: publicOperation(op) };
       }),
   );
 

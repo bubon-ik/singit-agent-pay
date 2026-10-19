@@ -220,7 +220,10 @@ async function callTool(name, args = {}) {
   if (impl.kind === "mcp-http") {
     if (!["create_mandate", "hold", "capture", "release", "refund", "open_dispute", "resolve_dispute", "list_audit_log"].includes(name)) return { ok: false, code: "INVALID_INPUT", message: `unknown tool ${name}` };
     try {
-      const { structuredContent } = await mcpClient.callTool({ name, arguments: args });
+      // Live MCP requires one idempotencyKey per economic intent (MVP-02). Each story step is its own
+      // intent and the bridge never retries a step, so a fresh key per call is the honest choice.
+      const keyed = ["hold", "capture", "release", "refund"].includes(name) && !args.idempotencyKey ? { ...args, idempotencyKey: `dash-${randomBytes(12).toString("hex")}` } : args;
+      const { structuredContent } = await mcpClient.callTool({ name, arguments: keyed });
       await refreshRemoteState((process.env.SINGIT_MCP_URL ?? "http://127.0.0.1:8787").replace(/\/$/, ""));
       if (structuredContent?.ok === false) return { ok: false, code: structuredContent.code ?? "ERROR", message: structuredContent.reason ?? "MCP tool failed" };
       if (structuredContent?.ok !== true) return { ok: false, code: "ERROR", message: "MCP tool returned no structured result" };
@@ -305,7 +308,7 @@ async function runStory({ delay = DEFAULT_DELAY_MS, autoApprove = false, mode = 
     ["Unknown seller → BLOCKED", "The agent tries to hold for a seller that isn't on the mandate — refused before any money moves.", async () => callTool("hold", { actor: AGENTS.payer, mandateId, payee: AGENTS.rogue, amount: "1000000" }), "COUNTERPARTY_NOT_ALLOWED"],
     ["4 USDC more → BLOCKED: over budget", "Only 3.5 USDC is left, so a 4 USDC hold is blocked — and written to the audit log.", async () => callTool("hold", { actor: AGENTS.payer, mandateId, payee: AGENTS.vendor, amount: (4n * U).toString() }), "OVER_BUDGET"],
     ["Data-vendor refunds 0.5 USDC", "A goodwill refund from the seller. Refunds never re-open the budget.", async () => callTool("refund", { actor: AGENTS.vendor, holdId: h1, amount: "500000" })],
-    ["Research-bot opens a dispute", "The GPU job came back empty: the agent disputes it, and the hold is frozen pending a human decision.", async () => { const r = await callTool("open_dispute", { actor: AGENTS.payer, holdId: h2, reason: "GPU job returned empty results", evidence: ["job-7f3a: output.parquet 0 rows", "SLA: non-empty dataset"] }); if (!r.ok) throw Error(`${r.code}: ${r.message}`); disputeId = r.result.dispute?.id ?? r.result.id; if (!disputeId) throw Error("Dispute returned no ID"); }],
+    ["Research-bot opens a dispute", "The GPU job came back empty: the agent disputes it, and SingIt stops captures on the hold pending a human decision.", async () => { const r = await callTool("open_dispute", { actor: AGENTS.payer, holdId: h2, reason: "GPU job returned empty results", evidence: ["job-7f3a: output.parquet 0 rows", "SLA: non-empty dataset"] }); if (!r.ok) throw Error(`${r.code}: ${r.message}`); disputeId = r.result.dispute?.id ?? r.result.id; if (!disputeId) throw Error("Dispute returned no ID"); }],
     ["Agent tries to settle its own dispute → BLOCKED", "The agent tries to approve its own refund — no token, then a forged token. Both refused: only a human can approve.", async () => {
       for (const approvalToken of ["", "f".repeat(64)]) {
         const r = await callTool("resolve_dispute", { actor: AGENTS.payer, disputeId, outcome: "refund", refundAmount: "4000000", approvalToken });

@@ -94,10 +94,22 @@ export class Refusal extends Error {
   constructor(
     public readonly code: RefusalCode,
     message: string,
+    /** The journaled operation this refusal is about (pending/UNKNOWN/failed/in flight), so the
+     * caller can observe it read-only instead of starting a new payment (MVP-02). */
+    public readonly operationId?: string,
   ) {
     super(message);
     this.name = "Refusal";
   }
+}
+
+/** Result of one economic write: the hold as that operation left it, and its journal id. */
+export interface OpOutcome {
+  hold: Hold;
+  operationId: string;
+  /** true = the same idempotencyKey already succeeded; nothing was sent again. */
+  replay: boolean;
+  txSig: string | null;
 }
 
 export interface PaymentServiceOptions {
@@ -108,6 +120,34 @@ export interface PaymentServiceOptions {
   mint?: string;
   /** Durable operation journal + state snapshot. Defaults to an in-memory store (nothing survives a restart). */
   store?: StateStore;
+  /**
+   * Live devnet policy, set by createServiceRuntime for capture402 (MVP-02/04/05). Every economic
+   * write must carry a client idempotencyKey; an UNKNOWN outcome closes write admission until a
+   * restart; flows not accepted for live use (automatic cleanup releases, two-step dispute
+   * refunds) are refused by the server. Off by default so the mock demo keeps its behaviour.
+   */
+  live?: boolean;
+}
+
+/** Wraps every durable write so a failed append (disk full, EIO, fsync error) closes economic
+ * write admission and surfaces as STORAGE_FAILURE instead of an unclassified crash (MVP-04). */
+function guardStore(store: StateStore, onFailure: () => Refusal): StateStore {
+  const guarded = <T>(write: (value: T) => void) => (value: T) => {
+    try {
+      write(value);
+    } catch {
+      throw onFailure();
+    }
+  };
+  return {
+    load: () => store.load(),
+    putMandate: guarded((m) => store.putMandate(m)),
+    putHold: guarded((h) => store.putHold(h)),
+    putDispute: guarded((d) => store.putDispute(d)),
+    putOp: guarded((op) => store.putOp(op)),
+    putOpCommit: guarded((c) => store.putOpCommit(c)),
+    appendAudit: guarded((e) => store.appendAudit(e)),
+  };
 }
 
 export interface CreateMandateArgs {
@@ -334,6 +374,10 @@ export class PaymentService {
   private readonly approvalSecret?: string;
   private readonly mint: string;
   private readonly store: StateStore;
+  private readonly live: boolean;
+  /** Set once economic writes must stop (MVP-04). Reads, replays and observation keep working;
+   * only a restart (whose startup reconciliation must pass) reopens admission. */
+  private admission: { code: RefusalCode; reason: string } | null = null;
 
   private readonly mandates = new Map<string, Mandate>();
   private readonly holds = new Map<string, Hold>();
@@ -344,10 +388,11 @@ export class PaymentService {
   private readonly idempotencyIndex = new Map<string, string>();
   /** holdId -> the single op currently pending|unknown on it (the per-hold in-flight guard). */
   private readonly holdLocks = new Map<string, string>();
-  /** opIds whose backend call is actively awaiting IN THIS PROCESS right now (added in beginOp,
-   * removed once that call settles). reconcile() must not race a call that is still in flight:
-   * e.g. on devnet, getTxOutcome can legitimately say not_found before onPrepared/send has even
-   * happened, which would otherwise make reconcile free a reservation the live call still owns. */
+  /** opIds being worked on IN THIS PROCESS right now: from beginOp until the outcome is committed
+   * locally (not merely until the backend call settles), and for the duration of a reconcile().
+   * reconcile() and idempotent replays must not race that work: e.g. on devnet, getTxOutcome can
+   * legitimately say not_found before onPrepared/send has even happened, and two overlapping
+   * reconciles of one op would each apply its delta. */
   private readonly inFlight = new Set<string>();
 
   private mandateSeq = 0;
@@ -376,7 +421,14 @@ export class PaymentService {
     this.now = opts.now ?? (() => Math.floor(Date.now() / 1000));
     this.approvalSecret = opts.approvalSecret;
     this.mint = opts.mint ?? DEVNET_USDC_MINT;
-    this.store = opts.store ?? new MemoryStateStore();
+    this.live = opts.live ?? false;
+    this.store = guardStore(opts.store ?? new MemoryStateStore(), () => {
+      this.closeAdmission("STORAGE_FAILURE", "a durable journal write failed");
+      return new Refusal(
+        "STORAGE_FAILURE",
+        "BLOCKED: a durable journal write failed; economic writes are closed until an operator inspects the store and restarts",
+      );
+    });
 
     const snapshot = this.store.load();
     this.mandateSeq = snapshot.seqs.mandateSeq;
@@ -441,7 +493,62 @@ export class PaymentService {
       refundable: fields.refundable != null ? fields.refundable.toString() : null,
     };
     this.auditLog.push(entry);
-    this.store.appendAudit(entry);
+    try {
+      this.store.appendAudit(entry);
+    } catch {
+      // The guarded store already closed admission. Keep the entry in memory and let the
+      // refusal that caused this record surface instead of a secondary audit-write error.
+    }
+  }
+
+  /** Stops new economic writes (idempotent: the first reason wins). Reads and replays continue. */
+  closeAdmission(code: Extract<RefusalCode, "ADMISSION_CLOSED" | "STORAGE_FAILURE">, reason: string): void {
+    if (!this.admission) this.admission = { code, reason };
+  }
+
+  /** Economic readiness, distinct from liveness (MVP-04). Counts only; no private evidence. */
+  admissionStatus(): { open: boolean; code: RefusalCode | null; reason: string | null; unresolvedOps: number } {
+    const unresolvedOps = [...this.ops.values()].filter((o) => o.state === "pending" || o.state === "unknown").length;
+    return { open: !this.admission, code: this.admission?.code ?? null, reason: this.admission?.reason ?? null, unresolvedOps };
+  }
+
+  private assertAdmission(): void {
+    if (this.admission) {
+      throw new Refusal("ADMISSION_CLOSED", `BLOCKED: economic writes are closed (${this.admission.code}): ${this.admission.reason}`);
+    }
+  }
+
+  /** Validates the key's format and, in live mode, that the client supplied one at all. */
+  private requireKey(idempotencyKey: string | undefined): void {
+    this.validateIdempotencyKey(idempotencyKey);
+    if (this.live && idempotencyKey === undefined) {
+      throw new Refusal(
+        "IDEMPOTENCY_KEY_REQUIRED",
+        "BLOCKED: live economic writes require an idempotencyKey (one per intent; reuse it unchanged on every retry)",
+      );
+    }
+  }
+
+  /**
+   * MVP-02: looks a caller-supplied key up BEFORE any check that applies only to a new operation
+   * (held amount, refundable, deadlines), so a retry after the original succeeded replays that
+   * outcome instead of failing on the state the outcome itself produced. Null = nothing to replay.
+   */
+  private async findReplay(
+    action: OpAction,
+    actor: string,
+    idempotencyKey: string | undefined,
+    canonicalParams: Record<string, unknown>,
+  ): Promise<OperationRecord | null> {
+    if (idempotencyKey === undefined) return null;
+    const existing = this.idempotencyIndex.get(this.scopedKey(action, actor, idempotencyKey));
+    if (!existing) return null;
+    return this.resolveIdempotentOp(existing, paramsHash(canonicalize(canonicalParams)), action);
+  }
+
+  /** The hold exactly as `op`'s success left it; journals predating that snapshot fall back to the current hold. */
+  private replayHold(op: OperationRecord, current: Hold): Hold {
+    return op.result?.hold ? deserializeHold(op.result.hold) : current;
   }
 
   private recordReconcile(op: OperationRecord, from: OpState, to: OpState, reason: string): void {
@@ -472,6 +579,9 @@ export class PaymentService {
     salt?: string;
     expected?: { held: string; refundable: string };
     reservation: bigint;
+    /** hold only: the mandate whose committed already includes this reservation, journaled in
+     * the same record as the pending op so neither can be durable without the other. */
+    reservedOn?: Mandate;
   }): OperationRecord {
     const now = this.now();
     const op: OperationRecord = {
@@ -493,7 +603,8 @@ export class PaymentService {
     this.idempotencyIndex.set(fields.key, op.id);
     if (fields.holdId) this.holdLocks.set(fields.holdId, op.id);
     this.inFlight.add(op.id);
-    this.store.putOp(op);
+    if (fields.reservedOn) this.store.putOpCommit({ op, mandate: serializeMandate(fields.reservedOn) });
+    else this.store.putOp(op);
     return op;
   }
 
@@ -510,6 +621,7 @@ export class PaymentService {
    * other (non-BackendError) throw is treated the same conservative way.
    */
   private async submit<T>(op: OperationRecord, holdIdForLock: string | null, call: (ctx: SubmitContext) => Promise<T>): Promise<T> {
+    // op stays in `inFlight` after this returns; the caller removes it once the outcome is committed.
     try {
       return await this.withBackendLock(() =>
         call({
@@ -535,14 +647,17 @@ export class PaymentService {
         throw refusal;
       }
       op.state = "unknown";
+      if (this.live) this.closeAdmission("ADMISSION_CLOSED", `operation ${op.id} (${op.action}) has an UNKNOWN outcome`);
       this.store.putOp(op);
       this.record("OUTCOME_UNKNOWN", op.actor, "blocked", "OPERATION_UNKNOWN", `op ${op.id} (${op.action}) outcome unknown; reservation kept for reconcile`, {
         mandateId: op.mandateId,
         holdId: holdIdForLock ?? op.holdId,
       });
-      throw new Refusal("OPERATION_UNKNOWN", `BLOCKED: ${op.action} on ${holdIdForLock ?? op.mandateId} is ambiguous (no confirmed backend response); it will be reconciled`);
-    } finally {
-      this.inFlight.delete(op.id);
+      throw new Refusal(
+        "OPERATION_UNKNOWN",
+        `BLOCKED: ${op.action} on ${holdIdForLock ?? op.mandateId} is ambiguous (no confirmed backend response); observe operation ${op.id}, never resend`,
+        op.id,
+      );
     }
   }
 
@@ -560,7 +675,7 @@ export class PaymentService {
     // Confirmed holds are represented by mandate.committed; only unresolved holds
     // count as reservations in the operation journal.
     op.reservation = "0";
-    op.result = result;
+    op.result = mutated?.hold ? { ...result, hold: serializeHold(mutated.hold) } : result;
     op.updatedAt = this.now();
     if (holdIdForLock && this.holdLocks.get(holdIdForLock) === op.id) this.holdLocks.delete(holdIdForLock);
     if (mutated?.hold || mutated?.mandate) {
@@ -581,19 +696,23 @@ export class PaymentService {
    */
   private async resolveIdempotentOp(existingOpId: string, hash: string, actionLabel: string): Promise<OperationRecord> {
     let op = this.ops.get(existingOpId);
-    if (!op) throw new Refusal("OPERATION_UNKNOWN", `BLOCKED: operation ${existingOpId} is missing from the journal`);
+    if (!op) throw new Refusal("OPERATION_UNKNOWN", `BLOCKED: operation ${existingOpId} is missing from the journal`, existingOpId);
     if (op.params.paramsHash !== hash) {
-      throw new Refusal("IDEMPOTENCY_KEY_REUSED", `BLOCKED: idempotency key already used for a ${actionLabel} with different parameters`);
+      throw new Refusal("IDEMPOTENCY_KEY_REUSED", `BLOCKED: idempotency key already used for a ${actionLabel} with different parameters`, op.id);
+    }
+    if (this.inFlight.has(op.id)) {
+      // A concurrent identical request: never a second send. Observe, then retry with the same key.
+      throw new Refusal("OPERATION_PENDING", `BLOCKED: operation ${op.id} for this idempotency key is still in progress; retry with the same key`, op.id);
     }
     if (op.state === "pending" || op.state === "unknown") {
       await this.reconcile(op.id);
       op = this.ops.get(existingOpId)!;
     }
     if (op.state === "failed") {
-      throw new Refusal(op.error?.refusalCode ?? "BACKEND_ERROR", op.error?.message ?? `BLOCKED: operation ${op.id} failed`);
+      throw new Refusal(op.error?.refusalCode ?? "BACKEND_ERROR", op.error?.message ?? `BLOCKED: operation ${op.id} failed`, op.id);
     }
     if (op.state !== "succeeded") {
-      throw new Refusal("OPERATION_UNKNOWN", `BLOCKED: operation ${op.id} is still unresolved; it will be retried by reconcile`);
+      throw new Refusal("OPERATION_UNKNOWN", `BLOCKED: operation ${op.id} is still unresolved; observe it, never resend`, op.id);
     }
     return op;
   }
@@ -623,12 +742,14 @@ export class PaymentService {
     const existingOpId = this.idempotencyIndex.get(key);
     if (existingOpId) {
       const op = await this.resolveIdempotentOp(existingOpId, hash, opts.action);
-      return { hold: opts.hold, replay: true, op };
+      return { hold: this.replayHold(op, opts.hold), replay: true, op };
     }
 
-    if (this.holdLocks.has(opts.hold.id)) {
-      throw new Refusal("OPERATION_PENDING", `BLOCKED: another operation on hold ${opts.hold.id} is still pending/unknown`);
+    const locked = this.holdLocks.get(opts.hold.id);
+    if (locked) {
+      throw new Refusal("OPERATION_PENDING", `BLOCKED: another operation on hold ${opts.hold.id} is still pending/unknown`, locked);
     }
+    this.assertAdmission();
 
     const op = this.beginOp({
       key,
@@ -641,10 +762,14 @@ export class PaymentService {
       reservation: 0n,
     });
 
-    const receipt = await this.submit(op, opts.hold.id, opts.call);
-    const extra = opts.applyMutation(receipt);
-    this.finalizeOpSucceeded(op, { txSig: receipt.txSig }, opts.hold.id, { hold: opts.hold, mandate: extra?.mandate });
-    return { hold: opts.hold, replay: false, op };
+    try {
+      const receipt = await this.submit(op, opts.hold.id, opts.call);
+      const extra = opts.applyMutation(receipt);
+      this.finalizeOpSucceeded(op, { txSig: receipt.txSig }, opts.hold.id, { hold: opts.hold, mandate: extra?.mandate });
+      return { hold: opts.hold, replay: false, op };
+    } finally {
+      this.inFlight.delete(op.id);
+    }
   }
 
   private payerForOp(op: OperationRecord): string {
@@ -774,7 +899,9 @@ export class PaymentService {
     holdId: string,
     txSig: string | undefined,
     readOnly = false,
-  ): Promise<{ kind: "unknown" } | { kind: "wrong_mint"; cleanupSucceeded: boolean; statusMint: string | null } | { kind: "ok"; hold: Hold }> {
+  ): Promise<
+    { kind: "unknown" } | { kind: "wrong_mint"; cleanupSucceeded: boolean; cleanupDisabled?: true; statusMint: string | null } | { kind: "ok"; hold: Hold }
+  > {
     const mandate = this.mandates.get(op.mandateId);
     const p = op.params as Record<string, unknown>;
     const resolved = (p.resolved ?? {}) as { captureDeadline?: number; refundDeadline?: number; mint?: string };
@@ -815,19 +942,6 @@ export class PaymentService {
       op.result = { holdId, txSig };
       op.updatedAt = this.now();
       if (this.holdLocks.get(holdId) === op.id) this.holdLocks.delete(holdId);
-      this.store.putOp(op);
-
-      const cleanupCanonical = canonicalize({ holdId, expectedHeld: amount, expectedRefundable: 0n });
-      const cleanupOp = this.beginOp({
-        key: this.scopedKey("cleanup_release", op.actor, holdId),
-        action: "cleanup_release",
-        actor: op.actor,
-        mandateId: op.mandateId,
-        holdId,
-        params: { ...cleanupCanonical, paramsHash: paramsHash(cleanupCanonical) },
-        expected: { held: "0", refundable: "0" },
-        reservation: amount,
-      });
 
       // Only persisted (and quarantined) if the cleanup attempt below does NOT succeed
       // immediately: a hold that is cleaned up synchronously never needs to become visible.
@@ -849,7 +963,35 @@ export class PaymentService {
           lastTxSig: txSig ?? null,
         } satisfies Hold);
 
-      const cleanupSucceeded = await this.attemptCleanupRelease(cleanupOp, hold);
+      if (this.live) {
+        // MVP-05: automatic cleanup is not accepted for live use. Record the hold quarantined with
+        // its amount still committed, in the same record as the op; recovery is the payer's
+        // reclaim after captureDeadline or a separately approved release, never a server resend.
+        hold.quarantined = true;
+        this.holds.set(holdId, hold);
+        this.store.putOpCommit({ op, hold: serializeHold(hold) });
+        return { kind: "wrong_mint", cleanupSucceeded: false, cleanupDisabled: true, statusMint: status.mint ?? null };
+      }
+      this.store.putOp(op);
+
+      const cleanupCanonical = canonicalize({ holdId, expectedHeld: amount, expectedRefundable: 0n });
+      const cleanupOp = this.beginOp({
+        key: this.scopedKey("cleanup_release", op.actor, holdId),
+        action: "cleanup_release",
+        actor: op.actor,
+        mandateId: op.mandateId,
+        holdId,
+        params: { ...cleanupCanonical, paramsHash: paramsHash(cleanupCanonical) },
+        expected: { held: "0", refundable: "0" },
+        reservation: amount,
+      });
+
+      let cleanupSucceeded: boolean;
+      try {
+        cleanupSucceeded = await this.attemptCleanupRelease(cleanupOp, hold);
+      } finally {
+        this.inFlight.delete(cleanupOp.id);
+      }
       if (!cleanupSucceeded) {
         hold.quarantined = true;
         this.holds.set(holdId, hold);
@@ -858,9 +1000,10 @@ export class PaymentService {
       return { kind: "wrong_mint", cleanupSucceeded, statusMint: status.mint ?? null };
     }
 
-    if (this.holds.has(holdId)) {
-      this.finalizeOpSucceeded(op, { holdId, txSig }, holdId);
-      return { kind: "ok", hold: this.holds.get(holdId)! };
+    const existing = this.holds.get(holdId);
+    if (existing) {
+      this.finalizeOpSucceeded(op, { holdId, txSig }, holdId, { hold: existing });
+      return { kind: "ok", hold: existing };
     }
 
     const hold: Hold = {
@@ -879,9 +1022,9 @@ export class PaymentService {
       lastTxSig: txSig ?? null,
     };
     this.holds.set(holdId, hold);
-    this.store.putHold(serializeHold(hold));
     op.holdId = holdId;
-    this.finalizeOpSucceeded(op, { holdId, txSig }, holdId);
+    // The new hold and the op's success land in one durable record (no hold without its op).
+    this.finalizeOpSucceeded(op, { holdId, txSig }, holdId, { hold });
     return { kind: "ok", hold };
   }
 
@@ -891,7 +1034,9 @@ export class PaymentService {
    * cleanup attempt never has a terminal "failed" state, since the funds are still genuinely
    * held and must keep being retried rather than abandoned. */
   private async attemptCleanupRelease(cleanupOp: OperationRecord, hold: Hold): Promise<boolean> {
-    this.inFlight.add(cleanupOp.id);
+    // beginOp or reconcile() may already own this op; then they release it, not this call.
+    const owned = !this.inFlight.has(cleanupOp.id);
+    if (owned) this.inFlight.add(cleanupOp.id);
     try {
       const receipt = await this.withBackendLock(() =>
         this.backend.release(
@@ -906,13 +1051,9 @@ export class PaymentService {
         ),
       );
       hold.held = 0n;
-      this.store.putHold(serializeHold(hold));
       const mandate = this.mandates.get(cleanupOp.mandateId);
-      if (mandate) {
-        mandate.committed -= BigInt(cleanupOp.reservation);
-        this.store.putMandate(serializeMandate(mandate));
-      }
-      this.finalizeOpSucceeded(cleanupOp, { txSig: receipt.txSig }, hold.id);
+      if (mandate) mandate.committed -= BigInt(cleanupOp.reservation);
+      this.finalizeOpSucceeded(cleanupOp, { txSig: receipt.txSig }, hold.id, { hold, mandate });
       return true;
     } catch (err) {
       cleanupOp.state = "unknown";
@@ -925,17 +1066,17 @@ export class PaymentService {
       this.store.putOp(cleanupOp);
       return false;
     } finally {
-      this.inFlight.delete(cleanupOp.id);
+      if (owned) this.inFlight.delete(cleanupOp.id);
     }
   }
 
   /**
    * reconcile()'s handling for a cleanup_release op whose getTxOutcome came back not_found/failed:
    * unlike every other action, this must NOT free the reservation and terminate as "failed" —
-   * the underlying hold is still genuinely held on-chain. Re-checks getStatus: if the funds are
-   * already back with the payer (this or an earlier attempt actually landed), finalize succeeded
-   * and free the reservation exactly once; otherwise issue a fresh guarded release attempt on
-   * the SAME op (new prepared tx).
+   * the underlying hold may still be held on-chain. Re-checks getStatus: held == 0 is NOT taken
+   * as repayment (a capture also empties a hold), so the op stays unknown with its reservation;
+   * held > 0 issues a fresh guarded release attempt on the SAME op in mock/demo mode only. Live
+   * mode never resubmits automatically (MVP-05).
    */
   private async retryCleanupRelease(op: OperationRecord, prevState: OpState): Promise<void> {
     const hold = op.holdId ? this.holds.get(op.holdId) : undefined;
@@ -967,16 +1108,27 @@ export class PaymentService {
     }
 
     if (status.held === 0n) {
-      // The funds are already back with the payer (this or an earlier attempt actually landed).
-      hold.held = 0n;
-      this.store.putHold(serializeHold(hold));
-      const mandate = this.mandates.get(op.mandateId);
-      if (mandate) {
-        mandate.committed -= BigInt(op.reservation);
-        this.store.putMandate(serializeMandate(mandate));
+      // MVP-05: H=0 is not proof of repayment. A capture also empties the hold, and this op's own
+      // transaction was just reported not found/failed, so nothing proves the funds went back to
+      // the payer. Keep the reservation and the quarantine; an operator verifies the original
+      // outcome rather than the service guessing a transfer direction.
+      if (op.state !== "unknown") {
+        op.state = "unknown";
+        op.updatedAt = this.now();
+        this.store.putOp(op);
       }
-      this.finalizeOpSucceeded(op, { txSig: op.prepared?.txSig ?? op.result?.txSig }, op.holdId);
-      this.recordReconcile(op, prevState, "succeeded", "on-chain state shows the hold already released; reservation freed");
+      this.recordReconcile(op, prevState, "unknown", "on-chain held is 0 but this cleanup's own transaction is unconfirmed; release vs capture cannot be told apart, reservation kept for operator review");
+      return;
+    }
+
+    if (this.live) {
+      // MVP-05: a fresh release would be a new wire/salt, i.e. a new economic action. Never automatic in live mode.
+      if (op.state !== "unknown") {
+        op.state = "unknown";
+        op.updatedAt = this.now();
+        this.store.putOp(op);
+      }
+      this.recordReconcile(op, prevState, "unknown", "cleanup transaction not executed; automatic resubmission is disabled in live mode, reservation kept");
       return;
     }
 
@@ -997,7 +1149,17 @@ export class PaymentService {
     if (!op) throw new Refusal("INVALID_INPUT", `BLOCKED: unknown operation ${opId}`);
     if (op.state === "succeeded" || op.state === "failed") return op;
     if (this.inFlight.has(op.id)) return op;
+    // Own the op for the whole reconcile: two overlapping reconciles (e.g. two concurrent replays
+    // of one key) would otherwise each apply its delta after their getTxOutcome/getStatus awaits.
+    this.inFlight.add(op.id);
+    try {
+      return await this.reconcileOwned(op, options);
+    } finally {
+      this.inFlight.delete(op.id);
+    }
+  }
 
+  private async reconcileOwned(op: OperationRecord, options: { readOnly?: boolean }): Promise<OperationRecord> {
     const prevState = op.state;
     const kind = RECONCILE_KIND[op.action];
 
@@ -1175,6 +1337,7 @@ export class PaymentService {
   async createMandate(args: CreateMandateArgs): Promise<Mandate> {
     const { actor, payer, totalBudget, perTxCap, expiresAt, allowedCounterparties, note } = args;
     try {
+      this.assertAdmission();
       if (totalBudget <= 0n || perTxCap <= 0n) {
         throw new Refusal("INVALID_INPUT", "BLOCKED: totalBudget and perTxCap must be > 0");
       }
@@ -1225,14 +1388,33 @@ export class PaymentService {
     }
   }
 
+  /** Audits an idempotent replay and returns the original outcome of `op`; nothing is sent. */
+  private recordReplay(action: "capture" | "release" | "refund", actor: string, op: OperationRecord, current: Hold, amount: bigint | null): OpOutcome {
+    const hold = this.replayHold(op, current);
+    const txSig = op.result?.txSig ?? hold.lastTxSig;
+    this.record(action, actor, "ok", null, `idempotent replay of ${op.id}`, {
+      mandateId: hold.mandateId,
+      holdId: hold.id,
+      amount,
+      txSig,
+      held: hold.held,
+      refundable: hold.captured - hold.refunded,
+    });
+    return { hold, operationId: op.id, replay: true, txSig };
+  }
+
   async hold(args: HoldArgs): Promise<Hold> {
+    return (await this.holdOp(args)).hold;
+  }
+
+  async holdOp(args: HoldArgs): Promise<OpOutcome> {
     const { actor, mandateId, payee, amount, mint, captureDeadline, refundDeadline, idempotencyKey } = args;
     let holdId: string | null = null;
     let txSig: string | null = null;
     let heldAfter: bigint | null = null;
     let refundableAfter: bigint | null = null;
     try {
-      this.validateIdempotencyKey(idempotencyKey);
+      this.requireKey(idempotencyKey);
       const key = this.scopedKey("hold", actor, idempotencyKey);
       const canonical = canonicalize({ mandateId, payee, amount, mint, captureDeadline, refundDeadline });
       const hash = paramsHash(canonical);
@@ -1240,18 +1422,21 @@ export class PaymentService {
       const existingOpId = this.idempotencyIndex.get(key);
       if (existingOpId) {
         const op = await this.resolveIdempotentOp(existingOpId, hash, "hold");
-        const hold = op.result?.holdId ? this.holds.get(op.result.holdId) : undefined;
-        if (!hold) throw new Refusal("OPERATION_UNKNOWN", `BLOCKED: operation ${op.id} succeeded but its hold is missing`);
+        const current = op.result?.holdId ? this.holds.get(op.result.holdId) : undefined;
+        if (!current) throw new Refusal("OPERATION_UNKNOWN", `BLOCKED: operation ${op.id} succeeded but its hold is missing`, op.id);
+        const hold = this.replayHold(op, current);
+        txSig = op.result?.txSig ?? hold.lastTxSig;
         this.record("hold", actor, "ok", null, `idempotent replay of ${op.id}`, {
           mandateId,
           holdId: hold.id,
           amount,
-          txSig: op.result?.txSig ?? hold.lastTxSig,
+          txSig,
           held: hold.held,
           refundable: hold.captured - hold.refunded,
         });
-        return hold;
+        return { hold, operationId: op.id, replay: true, txSig };
       }
+      this.assertAdmission();
 
       const mandate = this.mandates.get(mandateId);
       if (!mandate) throw new Refusal("MANDATE_NOT_FOUND", `BLOCKED: mandate not found: ${mandateId}`);
@@ -1331,44 +1516,50 @@ export class PaymentService {
         params: { ...canonical, paramsHash: hash, resolved: { captureDeadline: dc, refundDeadline: dr, mint: effectiveMint } },
         salt,
         reservation: amount,
+        reservedOn: mandate,
       });
-      this.store.putMandate(serializeMandate(mandate));
       // ---- end atomic reservation section ----
+      // A journal failure above (STORAGE_FAILURE) throws before any wire exists: nothing is sent.
 
-      const req: HoldRequest = { payer: mandate.payer, mint: effectiveMint, payee, maximum: amount, captureDeadline: dc, refundDeadline: dr, salt };
-      const receipt = await this.submit(op, null, (ctx) => this.backend.hold(req, ctx));
+      try {
+        const req: HoldRequest = { payer: mandate.payer, mint: effectiveMint, payee, maximum: amount, captureDeadline: dc, refundDeadline: dr, salt };
+        const receipt = await this.submit(op, null, (ctx) => this.backend.hold(req, ctx));
 
-      holdId = receipt.holdId;
-      txSig = receipt.txSig;
-      op.holdId = holdId;
-      this.holdLocks.set(holdId, op.id);
+        holdId = receipt.holdId;
+        txSig = receipt.txSig;
+        op.holdId = holdId;
+        this.holdLocks.set(holdId, op.id);
 
-      const result = await this.verifyAndFinalizeHold(op, holdId, txSig ?? undefined);
-      if (result.kind === "unknown") {
-        throw new Refusal("OPERATION_UNKNOWN", `BLOCKED: hold ${holdId} executed but its status could not be verified; it will be reconciled`);
-      }
-      if (result.kind === "wrong_mint") {
-        heldAfter = result.cleanupSucceeded ? 0n : amount;
+        const result = await this.verifyAndFinalizeHold(op, holdId, txSig ?? undefined);
+        if (result.kind === "unknown") {
+          if (this.live) this.closeAdmission("ADMISSION_CLOSED", `operation ${op.id} (hold) executed but could not be verified`);
+          throw new Refusal("OPERATION_UNKNOWN", `BLOCKED: hold ${holdId} executed but its status could not be verified; observe operation ${op.id}`, op.id);
+        }
+        if (result.kind === "wrong_mint") {
+          heldAfter = result.cleanupSucceeded ? 0n : amount;
+          refundableAfter = 0n;
+          const cleanupNote = result.cleanupDisabled
+            ? "hold quarantined with its amount still committed; automatic cleanup is disabled in live mode (payer reclaims after captureDeadline)"
+            : result.cleanupSucceeded
+              ? "funds released back to payer"
+              : "cleanup release pending, will retry";
+          throw new Refusal("WRONG_MINT", `BLOCKED: wrong mint on hold ${holdId}: expected ${this.mint}, got ${result.statusMint ?? "unknown"}; ${cleanupNote}`, op.id);
+        }
+
+        heldAfter = amount;
         refundableAfter = 0n;
-        throw new Refusal(
-          "WRONG_MINT",
-          `BLOCKED: wrong mint on hold ${holdId}: expected ${this.mint}, got ${result.statusMint ?? "unknown"}; ${
-            result.cleanupSucceeded ? "funds released back to payer" : "cleanup release pending, will retry"
-          }`,
-        );
+        this.record("hold", actor, "ok", null, `hold ${formatUsdc(amount)} on mandate ${mandateId} for payee ${payee}`, {
+          mandateId,
+          holdId,
+          amount,
+          txSig,
+          held: result.hold.held,
+          refundable: 0n,
+        });
+        return { hold: result.hold, operationId: op.id, replay: false, txSig };
+      } finally {
+        this.inFlight.delete(op.id);
       }
-
-      heldAfter = amount;
-      refundableAfter = 0n;
-      this.record("hold", actor, "ok", null, `hold ${formatUsdc(amount)} on mandate ${mandateId} for payee ${payee}`, {
-        mandateId,
-        holdId,
-        amount,
-        txSig,
-        held: result.hold.held,
-        refundable: 0n,
-      });
-      return result.hold;
     } catch (err) {
       const refusal = toRefusal(err);
       this.record("hold", actor, refusal.code === "BACKEND_ERROR" ? "error" : "blocked", refusal.code, refusal.message, {
@@ -1384,13 +1575,20 @@ export class PaymentService {
   }
 
   async capture(args: CaptureArgs): Promise<Hold> {
+    return (await this.captureOp(args)).hold;
+  }
+
+  async captureOp(args: CaptureArgs): Promise<OpOutcome> {
     const { actor, holdId, amount, releaseRemainder, idempotencyKey } = args;
     let txSig: string | null = null;
     try {
-      this.validateIdempotencyKey(idempotencyKey);
+      this.requireKey(idempotencyKey);
       const hold = this.holds.get(holdId);
       if (!hold) throw new Refusal("HOLD_NOT_FOUND", `BLOCKED: hold not found: ${holdId}`);
       if (actor !== hold.payee) throw new Refusal("NOT_PAYEE", `BLOCKED: ${actor} is not the payee of hold ${holdId}`);
+      const canonicalParams = { holdId, amount, releaseRemainder: !!releaseRemainder };
+      const prior = await this.findReplay("capture", actor, idempotencyKey, canonicalParams);
+      if (prior) return this.recordReplay("capture", actor, prior, hold, amount);
       if (hold.quarantined) throw new Refusal("WRONG_MINT", `BLOCKED: hold ${holdId} is quarantined (wrong mint/terms); its cleanup release is still pending`);
       if (hold.disputeId && this.disputes.get(hold.disputeId)?.status === "open") {
         throw new Refusal("DISPUTE_OPEN", `BLOCKED: hold ${holdId} has an open dispute`);
@@ -1412,7 +1610,7 @@ export class PaymentService {
         actor,
         idempotencyKey,
         hold,
-        canonicalParams: { holdId, amount, releaseRemainder: !!releaseRemainder },
+        canonicalParams,
         expected: { held: (releaseRemainder ? 0n : heldAfterCapture).toString(), refundable: (expectedRefundable + amount).toString() },
         call: (ctx) => this.backend.capture({ holdId, amount, releaseRemainder: !!releaseRemainder, expectedHeld, expectedRefundable }, ctx),
         applyMutation: (receipt) => {
@@ -1432,18 +1630,7 @@ export class PaymentService {
         },
       });
 
-      if (replay) {
-        txSig = op.result?.txSig ?? resultHold.lastTxSig;
-        this.record("capture", actor, "ok", null, `idempotent replay of ${op.id}`, {
-          mandateId: resultHold.mandateId,
-          holdId,
-          amount,
-          txSig,
-          held: resultHold.held,
-          refundable: resultHold.captured - resultHold.refunded,
-        });
-        return resultHold;
-      }
+      if (replay) return this.recordReplay("capture", actor, op, resultHold, amount);
 
       const remainderNote = releaseRemainder && heldAfterCapture > 0n ? `, released remainder ${formatUsdc(heldAfterCapture)}` : "";
       this.record("capture", actor, "ok", null, `captured ${formatUsdc(amount)} on hold ${holdId}${remainderNote}`, {
@@ -1454,7 +1641,7 @@ export class PaymentService {
         held: resultHold.held,
         refundable: resultHold.captured - resultHold.refunded,
       });
-      return resultHold;
+      return { hold: resultHold, operationId: op.id, replay: false, txSig };
     } catch (err) {
       const refusal = toRefusal(err);
       const hold = this.holds.get(holdId);
@@ -1471,13 +1658,19 @@ export class PaymentService {
   }
 
   async release(args: ReleaseArgs): Promise<Hold> {
+    return (await this.releaseOp(args)).hold;
+  }
+
+  async releaseOp(args: ReleaseArgs): Promise<OpOutcome> {
     const { actor, holdId, idempotencyKey } = args;
     let txSig: string | null = null;
     try {
-      this.validateIdempotencyKey(idempotencyKey);
+      this.requireKey(idempotencyKey);
       const hold = this.holds.get(holdId);
       if (!hold) throw new Refusal("HOLD_NOT_FOUND", `BLOCKED: hold not found: ${holdId}`);
       if (actor !== hold.payee) throw new Refusal("NOT_PAYEE", `BLOCKED: ${actor} is not the payee of hold ${holdId}`);
+      const prior = await this.findReplay("release", actor, idempotencyKey, { holdId });
+      if (prior) return this.recordReplay("release", actor, prior, hold, null);
       if (hold.quarantined) throw new Refusal("WRONG_MINT", `BLOCKED: hold ${holdId} is quarantined (wrong mint/terms); its cleanup release is still pending`);
       if (hold.held === 0n) throw new Refusal("NOTHING_HELD", `BLOCKED: nothing held on hold ${holdId}`);
 
@@ -1504,18 +1697,7 @@ export class PaymentService {
         },
       });
 
-      if (replay) {
-        txSig = op.result?.txSig ?? resultHold.lastTxSig;
-        this.record("release", actor, "ok", null, `idempotent replay of ${op.id}`, {
-          mandateId: resultHold.mandateId,
-          holdId,
-          amount: null,
-          txSig,
-          held: resultHold.held,
-          refundable: resultHold.captured - resultHold.refunded,
-        });
-        return resultHold;
-      }
+      if (replay) return this.recordReplay("release", actor, op, resultHold, null);
 
       this.record("release", actor, "ok", null, `released hold ${holdId}, returned ${formatUsdc(expectedHeld)} to payer`, {
         mandateId: resultHold.mandateId,
@@ -1525,7 +1707,7 @@ export class PaymentService {
         held: resultHold.held,
         refundable: resultHold.captured - resultHold.refunded,
       });
-      return resultHold;
+      return { hold: resultHold, operationId: op.id, replay: false, txSig };
     } catch (err) {
       const refusal = toRefusal(err);
       const hold = this.holds.get(holdId);
@@ -1542,13 +1724,19 @@ export class PaymentService {
   }
 
   async refund(args: RefundArgs): Promise<Hold> {
+    return (await this.refundOp(args)).hold;
+  }
+
+  async refundOp(args: RefundArgs): Promise<OpOutcome> {
     const { actor, holdId, amount, idempotencyKey } = args;
     let txSig: string | null = null;
     try {
-      this.validateIdempotencyKey(idempotencyKey);
+      this.requireKey(idempotencyKey);
       const hold = this.holds.get(holdId);
       if (!hold) throw new Refusal("HOLD_NOT_FOUND", `BLOCKED: hold not found: ${holdId}`);
       if (actor !== hold.payee) throw new Refusal("NOT_PAYEE", `BLOCKED: ${actor} is not the payee of hold ${holdId}`);
+      const prior = await this.findReplay("refund", actor, idempotencyKey, { holdId, amount });
+      if (prior) return this.recordReplay("refund", actor, prior, hold, amount);
       if (hold.quarantined) throw new Refusal("WRONG_MINT", `BLOCKED: hold ${holdId} is quarantined (wrong mint/terms); its cleanup release is still pending`);
       if (amount <= 0n) throw new Refusal("INVALID_INPUT", "BLOCKED: refund amount must be > 0");
       const refundable = hold.captured - hold.refunded;
@@ -1578,18 +1766,7 @@ export class PaymentService {
         },
       });
 
-      if (replay) {
-        txSig = op.result?.txSig ?? resultHold.lastTxSig;
-        this.record("refund", actor, "ok", null, `idempotent replay of ${op.id}`, {
-          mandateId: resultHold.mandateId,
-          holdId,
-          amount,
-          txSig,
-          held: resultHold.held,
-          refundable: resultHold.captured - resultHold.refunded,
-        });
-        return resultHold;
-      }
+      if (replay) return this.recordReplay("refund", actor, op, resultHold, amount);
 
       this.record("refund", actor, "ok", null, `refunded ${formatUsdc(amount)} on hold ${holdId}`, {
         mandateId: resultHold.mandateId,
@@ -1599,7 +1776,7 @@ export class PaymentService {
         held: resultHold.held,
         refundable: resultHold.captured - resultHold.refunded,
       });
-      return resultHold;
+      return { hold: resultHold, operationId: op.id, replay: false, txSig };
     } catch (err) {
       const refusal = toRefusal(err);
       const hold = this.holds.get(holdId);
@@ -1675,9 +1852,6 @@ export class PaymentService {
       this.validateIdempotencyKey(idempotencyKey);
       const dispute = this.disputes.get(disputeId);
       if (!dispute) throw new Refusal("DISPUTE_NOT_FOUND", `BLOCKED: dispute not found: ${disputeId}`);
-      if (dispute.status === "resolved") {
-        throw new Refusal("DISPUTE_ALREADY_RESOLVED", `BLOCKED: dispute ${disputeId} is already resolved`);
-      }
 
       if (!this.approvalSecret || this.approvalSecret.length < 16) {
         throw new Refusal("HUMAN_APPROVAL_REQUIRED", "BLOCKED: human approval is not configured");
@@ -1690,12 +1864,31 @@ export class PaymentService {
         throw new Refusal("HUMAN_APPROVAL_REQUIRED", "BLOCKED: invalid human approval token");
       }
       auditActor = `human-approved:${actor}`;
+      // After the approval check, so an agent without a token is told HUMAN_APPROVAL_REQUIRED.
+      this.requireKey(idempotencyKey);
+
+      if (dispute.status === "resolved") {
+        // MVP-02: a keyed retry of the SAME approved decision replays the original resolution.
+        const sameDecision = dispute.outcome === outcome && (dispute.refundAmount ?? 0n) === (outcome === "refund" ? (refundAmount ?? 0n) : 0n);
+        if (idempotencyKey !== undefined && sameDecision) {
+          this.record("resolve_dispute", auditActor, "ok", null, `idempotent replay of resolved dispute ${disputeId}`, {
+            mandateId: dispute.mandateId,
+            holdId: dispute.holdId,
+            disputeId,
+            amount: dispute.refundAmount && dispute.refundAmount > 0n ? dispute.refundAmount : null,
+            txSig: dispute.txSigs.at(-1) ?? null,
+          });
+          return dispute;
+        }
+        throw new Refusal("DISPUTE_ALREADY_RESOLVED", `BLOCKED: dispute ${disputeId} is already resolved`);
+      }
 
       const hold = this.holds.get(dispute.holdId);
       if (!hold) throw new Refusal("HOLD_NOT_FOUND", `BLOCKED: hold not found: ${dispute.holdId}`);
 
-      if (this.holdLocks.has(hold.id)) {
-        throw new Refusal("OPERATION_PENDING", `BLOCKED: another operation on hold ${hold.id} is still pending/unknown`);
+      const locked = this.holdLocks.get(hold.id);
+      if (locked) {
+        throw new Refusal("OPERATION_PENDING", `BLOCKED: another operation on hold ${hold.id} is still pending/unknown`, locked);
       }
 
       if (outcome === "reject") {
@@ -1723,6 +1916,14 @@ export class PaymentService {
       }
       if (requested > 0n && this.now() >= hold.refundDeadline) {
         throw new Refusal("REFUND_DEADLINE_PASSED", `BLOCKED: refund deadline passed for hold ${hold.id}`);
+      }
+      if (this.live && hold.held > 0n && requested > 0n) {
+        // MVP-05: release-then-refund is two economic operations whose partial completion has no
+        // accepted live recovery yet. Live mode runs only single-operation resolutions.
+        throw new Refusal(
+          "ACTION_DISABLED",
+          `BLOCKED: hold ${hold.id} still holds ${formatUsdc(hold.held)}; a release-plus-refund resolution is not enabled in live mode. Release or capture the hold first, then resolve with the refund`,
+        );
       }
 
       let releaseTxSig: string | null = null;

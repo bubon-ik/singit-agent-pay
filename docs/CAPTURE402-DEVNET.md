@@ -190,8 +190,9 @@ a durable offline restart. The live entrypoint now selects a private durable sto
 locks its directory and restores/reconciles pending records before admitting writes.
 An unresolved original outcome stops startup. Its startup pass never sends cleanup
 or replacement transactions. Verify this recovery behavior on the operator host.
-Review multi-process custody, post-send persistence failures and dispute cleanup
-separately. Local compatibility and mock MCP E2E are not live economic acceptance.
+Same-wallet custody across state directories, storage-failure admission and
+disabled automatic cleanup are now covered offline (see INTERFACE "Live safety
+policy"); they still need review and live acceptance. Local compatibility and mock MCP E2E are not live economic acceptance.
 
 ## Local checks
 

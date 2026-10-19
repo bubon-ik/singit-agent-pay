@@ -19,6 +19,7 @@ const TOOL_NAMES = [
   "open_dispute",
   "list_disputes",
   "resolve_dispute",
+  "get_operation",
   "list_audit_log",
 ];
 
@@ -40,7 +41,7 @@ function body(result: CallToolResult): any {
   return JSON.parse(text.text);
 }
 
-test("lists exactly the 11 tools, none exposing approve/token/secret", async () => {
+test("lists exactly the 12 tools, none exposing approve/token/secret", async () => {
   const { client } = await connectedClient();
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name);

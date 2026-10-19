@@ -45,7 +45,7 @@ sequenceDiagram
   B->>S: hold(5 USDC)
   S-->>B: BLOCKED OVER_PER_TX_CAP (no tx)
   B->>S: open_dispute(evidence)
-  Note over S: captures frozen on that hold
+  Note over S: service refuses captures on that hold (not on-chain)
   B->>S: resolve_dispute(no token)
   S-->>B: BLOCKED HUMAN_APPROVAL_REQUIRED
   H->>H: npm run approve d-1 refund 2500000

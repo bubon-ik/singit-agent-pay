@@ -26,7 +26,7 @@ async function stop(child: ChildProcess) {
 }
 async function fixture(chain: "devnet" | "mock" | null, configured = true) {
   const backend = new FaultyBackend(new MockBackend({ balances: { [payer]: 20_000_000n, [merchant]: 20_000_000n } }));
-  const service = new PaymentService({ backend, approvalSecret: secret });
+  const service = new PaymentService({ backend, approvalSecret: secret, live: chain === "devnet" });
   const upstream = createServer(createHttpHandler({ service, backendName: chain ?? "devnet", approvalSecret: secret, routeSecret: secret, trustedOperator: true }));
   const upstreamPort = await listen(upstream);
   if (chain === null) await close(upstream);
@@ -120,7 +120,7 @@ test("restored definite failure keeps its history and needs confirmation for a n
     const now = Math.floor(Date.now() / 1000);
     const mandate = await app.service.createMandate({ actor: "human", payer, totalBudget: 10_000_000n, perTxCap: 4_000_000n, expiresAt: now + 7200, allowedCounterparties: [merchant] });
     app.backend.queueHoldFault("definite-before");
-    await expect(app.service.hold({ actor: payer, mandateId: mandate.id, payee: merchant, amount: 3_000_000n })).rejects.toMatchObject({ code: "BACKEND_ERROR" });
+    await expect(app.service.hold({ actor: payer, mandateId: mandate.id, payee: merchant, amount: 3_000_000n, idempotencyKey: "restored-1" })).rejects.toMatchObject({ code: "BACKEND_ERROR" });
     const original = JSON.stringify(app.service.listOperations()[0]);
     await app.until(s => s.story.state === "idle" && s.ops?.some((op: any) => op.state === "failed"));
     expect((await app.post("/api/story")).body.code).toBe("DEVNET_CONFIRMATION_REQUIRED");
@@ -141,7 +141,7 @@ test("an original UNKNOWN blocks a new live story before another mandate or hold
     const now = Math.floor(Date.now() / 1000);
     const mandate = await app.service.createMandate({ actor: "human", payer, totalBudget: 10_000_000n, perTxCap: 4_000_000n, expiresAt: now + 7200, allowedCounterparties: [merchant] });
     app.backend.queueHoldFault("ambiguous-before");
-    await expect(app.service.hold({ actor: payer, mandateId: mandate.id, payee: merchant, amount: 3_000_000n })).rejects.toMatchObject({ code: "OPERATION_UNKNOWN" });
+    await expect(app.service.hold({ actor: payer, mandateId: mandate.id, payee: merchant, amount: 3_000_000n, idempotencyKey: "restored-2" })).rejects.toMatchObject({ code: "OPERATION_UNKNOWN" });
     await app.until(s => s.ops?.some((op: any) => op.state === "unknown"));
     expect((await app.post("/api/story", { confirmedDevnet: true, delay: 0 })).status).toBe(409);
     expect(app.service.listMandates()).toHaveLength(1);

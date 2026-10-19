@@ -56,9 +56,12 @@ only after their outcome can be established.
 
 Graceful shutdown releases `.singit-mcp.lock`. After a forced termination, confirm
 that the old process has stopped before manually removing that stale lock. Use
-one runtime and one state directory for these wallets; separate directories do
-not coordinate custody. Post-send storage failures and dispute cleanup still
-need independent live acceptance. The default mock demo remains ephemeral and
+one runtime per set of wallets: a second runtime with the same program, payer and
+merchant refuses with `NAMESPACE_LOCKED`, even with another state directory (one
+host only). A failed journal write or an UNKNOWN outcome closes economic writes
+until restart; `GET /ready` (human route secret) shows why. Live mode sends no
+automatic cleanup and refuses two-step dispute refunds. These offline-tested
+safeguards still need independent live acceptance. The default mock demo remains ephemeral and
 does not support a durable operation journal without its ledger.
 
 ## Local preview

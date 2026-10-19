@@ -79,9 +79,10 @@ Amounts are USDC base units as decimal strings (`2500000` = 2.5 USDC); times are
 | `capture` | Capture some or all of a hold. |
 | `release` | Return the uncaptured held amount to the payer. |
 | `refund` | Refund a captured amount from the payee to the payer. |
-| `open_dispute` | Open a dispute as the payer and freeze further captures. |
+| `open_dispute` | Open a dispute as the payer; this service then refuses captures until a human decides (not an on-chain freeze). |
 | `list_disputes` | List disputes, optionally filtered by status or mandate. |
 | `resolve_dispute` | Resolve a dispute as refund or reject with human approval. |
+| `get_operation` | Read the redacted status of one payment operation by its `operationId` (after a lost response or UNKNOWN). |
 | `list_audit_log` | Read audit entries, optionally filtered by mandate or limit. |
 
 ## Mandate rules

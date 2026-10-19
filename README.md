@@ -79,9 +79,10 @@ Amounts are USDC base units as decimal strings (`2500000` = 2.5 USDC); times are
 | `capture` | Capture some or all of a hold |
 | `release` | Return the uncaptured remainder to the payer |
 | `refund` | Payee refunds a captured amount |
-| `open_dispute` | Payer disputes a hold; captures freeze |
+| `open_dispute` | Payer disputes a hold; SingIt refuses captures until a human decides (not an on-chain freeze) |
 | `list_disputes` | Disputes, filterable by status or mandate |
 | `resolve_dispute` | Refund or reject; needs a human approval token |
+| `get_operation` | Read-only status of one payment operation after a lost response or UNKNOWN |
 | `list_audit_log` | Every action, including blocked ones |
 
 Full schemas, refusal codes and the backend contract: [docs/INTERFACE.md](docs/INTERFACE.md). Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -98,7 +99,7 @@ Full schemas, refusal codes and the backend contract: [docs/INTERFACE.md](docs/I
 
 FinTechers Prague, Track 2 "Agents that pay each other", 19–20 Oct 2026. Everything in this repository was written during the hackathon (the first commit is tagged `hackathon-start`):
 
-- **singit-mcp:** MCP server (stdio + streamable HTTP) with 11 tools
+- **singit-mcp:** MCP server (stdio + streamable HTTP) with 12 tools (including read-only `get_operation`)
 - **Mandate engine:** budget, per-tx cap, allowed counterparties, expiry, devnet-USDC mint pinning, deadline bounds
 - **Escrow lifecycle:** hold / capture / release / refund over a pluggable `PaymentBackend`
 - **Human approval:** disputes resolve only with an HMAC token over the exact decision, issued out of band; agents cannot self-approve
