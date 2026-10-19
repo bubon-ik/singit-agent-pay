@@ -7,6 +7,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { AmountError, parseUsdc } from "./amount.js";
+import type { AuditAction } from "./audit.js";
 import type { Principal } from "./principal.js";
 import { publicOperation } from "./public-state.js";
 import { type Mandate, PaymentService, Refusal } from "./service.js";
@@ -94,12 +95,13 @@ function toResult(obj: Record<string, unknown>, isError = false): CallToolResult
 }
 
 /** Runs a tool body; converts Refusal/AmountError into the refusal result shape instead of throwing. */
-async function run(fn: () => Promise<object>): Promise<CallToolResult> {
+async function run(fn: () => Promise<object>, onRefusal?: (refusal: Refusal) => void): Promise<CallToolResult> {
   try {
     const data = await fn();
     return toResult({ ok: true, ...data });
   } catch (err) {
     if (err instanceof Refusal) {
+      onRefusal?.(err);
       return toResult({ ok: false, code: err.code, reason: err.message, operationId: err.operationId }, true);
     }
     if (err instanceof AmountError) {
@@ -206,6 +208,20 @@ export const toolSchemas = {
 export function createMcpServer(service: PaymentService, principal?: Principal): McpServer {
   const server = new McpServer({ name: "singit-mcp", version: "0.1.0" });
   const guard = makeGuard(service, principal);
+  /** Like run(), but a PRINCIPAL_FORBIDDEN refusal of this write is audited: the guard refuses
+   * before the service is reached, and the log must still show every blocked attempt. */
+  const runWrite = (action: AuditAction, refs: { mandateId?: string; holdId?: string; disputeId?: string }, fn: () => Promise<object>) =>
+    run(fn, (refusal) => {
+      if (refusal.code !== "PRINCIPAL_FORBIDDEN") return;
+      let mandateId = refs.mandateId;
+      try {
+        if (!mandateId && refs.holdId) mandateId = service.getHold(refs.holdId).mandateId;
+        if (!mandateId && refs.disputeId) mandateId = service.getDispute(refs.disputeId).mandateId;
+      } catch {
+        // unknown object: audit without a mandate
+      }
+      service.recordRefusal(action, principal?.id ?? "unknown", refusal, { mandateId, holdId: refs.holdId, disputeId: refs.disputeId });
+    });
 
   server.registerTool(
     "create_mandate",
@@ -216,7 +232,7 @@ export function createMcpServer(service: PaymentService, principal?: Principal):
       inputSchema: toolSchemas.create_mandate,
     },
     (args) =>
-      run(async () => {
+      runWrite("create_mandate", {}, async () => {
         guard.mandateIssuance();
         const mandate = await service.createMandate({
           actor: args.actor ?? args.payer,
@@ -258,7 +274,7 @@ export function createMcpServer(service: PaymentService, principal?: Principal):
       inputSchema: toolSchemas.hold,
     },
     (args) =>
-      run(async () => {
+      runWrite("hold", { mandateId: args.mandateId }, async () => {
         const outcome = await service.holdOp({
           actor: guard.actorFor("hold", args.actor, { mandateId: args.mandateId }),
           mandateId: args.mandateId,
@@ -281,7 +297,7 @@ export function createMcpServer(service: PaymentService, principal?: Principal):
       inputSchema: toolSchemas.capture,
     },
     (args) =>
-      run(async () => {
+      runWrite("capture", { holdId: args.holdId }, async () => {
         return service.captureOp({
           actor: guard.actorFor("capture", args.actor, { holdId: args.holdId }),
           holdId: args.holdId,
@@ -299,7 +315,7 @@ export function createMcpServer(service: PaymentService, principal?: Principal):
       inputSchema: toolSchemas.release,
     },
     (args) =>
-      run(async () => {
+      runWrite("release", { holdId: args.holdId }, async () => {
         return service.releaseOp({
           actor: guard.actorFor("release", args.actor, { holdId: args.holdId }),
           holdId: args.holdId,
@@ -317,7 +333,7 @@ export function createMcpServer(service: PaymentService, principal?: Principal):
       inputSchema: toolSchemas.refund,
     },
     (args) =>
-      run(async () => {
+      runWrite("refund", { holdId: args.holdId }, async () => {
         return service.refundOp({
           actor: guard.actorFor("refund", args.actor, { holdId: args.holdId }),
           holdId: args.holdId,
@@ -336,7 +352,7 @@ export function createMcpServer(service: PaymentService, principal?: Principal):
       inputSchema: toolSchemas.open_dispute,
     },
     (args) =>
-      run(async () => {
+      runWrite("open_dispute", { holdId: args.holdId }, async () => {
         const dispute = await service.openDispute({
           actor: guard.actorFor("open_dispute", args.actor, { holdId: args.holdId }),
           holdId: args.holdId,
@@ -366,7 +382,7 @@ export function createMcpServer(service: PaymentService, principal?: Principal):
       inputSchema: toolSchemas.resolve_dispute,
     },
     (args) =>
-      run(async () => {
+      runWrite("resolve_dispute", { disputeId: args.disputeId }, async () => {
         guard.humanOnly("resolve_dispute");
         const dispute = await service.resolveDispute({
           actor: args.actor ?? "human",

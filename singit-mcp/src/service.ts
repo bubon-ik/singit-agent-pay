@@ -1327,6 +1327,12 @@ export class PaymentService {
     );
   }
 
+  /** Audits a refusal raised before the service was reached (a transport principal that may not
+   * act, MVP-01), so the log still shows every blocked attempt. No state changes. */
+  recordRefusal(action: AuditAction, actor: string, refusal: Refusal, refs: { mandateId?: string | null; holdId?: string | null; disputeId?: string | null }): void {
+    this.record(action, actor, "blocked", refusal.code, refusal.message, refs);
+  }
+
   /** Records that this (freshly constructed) service replaced the prior mock-backend state. HTTP /human/reset only. */
   recordReset(actor: string): void {
     this.record("reset", actor, "ok", null, "state reset to defaults (mock backend)", {});

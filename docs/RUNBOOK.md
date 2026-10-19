@@ -20,7 +20,7 @@ The core rule: **UNKNOWN or any invariant failure stops writes first.** Never re
 Checklist:
 - [ ] The private env file is outside the checkout, mode 600, and based on `singit-mcp/deploy/hackathon.env.example` with `SINGIT_BACKEND=capture402`, an approved HTTPS devnet RPC, the confirmed program values, keypair paths, payer and merchant public addresses, `SINGIT_STATE_DIR` and both human secrets (16+ chars, all distinct).
 - [ ] Payer and merchant are throwaway devnet wallets with Circle devnet USDC, SOL and canonical ATAs (MVP-06).
-- [ ] Agent tokens `SINGIT_BUYER_TOKEN` / `SINGIT_MERCHANT_TOKEN` are set for the buyer and merchant agents. Agents never get keypairs, human secrets or RPC credentials.
+- [ ] Agent tokens `SINGIT_BUYER_TOKEN` / `SINGIT_MERCHANT_TOKEN` (16+ chars, distinct) are set in the env file for the buyer and merchant agents. `live:all` then runs without trusted-operator mode. Agents never get keypairs, human secrets or RPC credentials.
 - [ ] `npm ci` at the repository root; the offline gate passes on this SHA.
 
 ## 2. Start

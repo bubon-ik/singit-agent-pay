@@ -55,7 +55,7 @@ Coverage is PASS only where a named test exercises the case on the pinned SHA. T
 
 | Issue | State on this SHA |
 |---|---|
-| #9 MVP-01 trusted principals | Implemented (PR #17). Open follow-up: the dashboard bridge still uses `SINGIT_MCP_TRUSTED_OPERATOR=1` instead of per-role tokens |
+| #9 MVP-01 trusted principals | Implemented (PR #17). Dashboard bridge per-role tokens and audited `PRINCIPAL_FORBIDDEN` added after this SHA (re-run the gate on the final SHA) |
 | #10 MVP-02 idempotency | Implemented (PR #19); offline evidence above |
 | #11 MVP-03 atomic accounting | Partial (PR #18, PR #19). Open: audit-crash recovery, legacy JSONL migration, blocked safe mode for corruption |
 | #12 MVP-04 custody and readiness | Implemented on one host (PR #19). Open: cross-host custody, admission close on a deployment change, read-only inspection when startup refuses |

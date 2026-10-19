@@ -24,10 +24,12 @@ async function stop(child: ChildProcess) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   await new Promise<void>(resolve => { child.once("exit", () => resolve()); child.kill(); });
 }
-async function fixture(chain: "devnet" | "mock" | null, configured = true) {
+const buyerToken = "synthetic-buyer-token-0123456789", merchantToken = "synthetic-merchant-token-0123456789";
+async function fixture(chain: "devnet" | "mock" | null, configured = true, roleTokens = false) {
   const backend = new FaultyBackend(new MockBackend({ balances: { [payer]: 20_000_000n, [merchant]: 20_000_000n } }));
   const service = new PaymentService({ backend, approvalSecret: secret, live: chain === "devnet" });
-  const upstream = createServer(createHttpHandler({ service, backendName: chain ?? "devnet", approvalSecret: secret, routeSecret: secret, trustedOperator: true }));
+  const credentials = roleTokens ? [{ role: "buyer" as const, id: payer, token: buyerToken }, { role: "merchant" as const, id: merchant, token: merchantToken }] : undefined;
+  const upstream = createServer(createHttpHandler({ service, backendName: chain ?? "devnet", approvalSecret: secret, routeSecret: secret, trustedOperator: !roleTokens, credentials }));
   const upstreamPort = await listen(upstream);
   if (chain === null) await close(upstream);
   const reservation = createServer(), port = await listen(reservation);
@@ -35,7 +37,7 @@ async function fixture(chain: "devnet" | "mock" | null, configured = true) {
   const root = fileURLToPath(new URL("../../demo-dashboard/", import.meta.url));
   const child = spawn(process.execPath, ["server.mjs"], {
     cwd: root,
-    env: { ...process.env, PORT: String(port), SINGIT_BACKEND: "mcp-http", SINGIT_REQUIRE_DEVNET: "1", SINGIT_MCP_WAIT_MS: "0", SINGIT_MCP_URL: `http://127.0.0.1:${upstreamPort}`, SINGIT_HUMAN_ROUTE_SECRET: secret, SINGIT_PAYER_ADDRESS: configured ? payer : "", SINGIT_MERCHANT_ADDRESS: configured ? merchant : "" },
+    env: { ...process.env, PORT: String(port), SINGIT_BACKEND: "mcp-http", SINGIT_REQUIRE_DEVNET: "1", SINGIT_MCP_WAIT_MS: "0", SINGIT_MCP_URL: `http://127.0.0.1:${upstreamPort}`, SINGIT_HUMAN_ROUTE_SECRET: secret, SINGIT_PAYER_ADDRESS: configured ? payer : "", SINGIT_MERCHANT_ADDRESS: configured ? merchant : "", SINGIT_BUYER_TOKEN: roleTokens ? buyerToken : "", SINGIT_MERCHANT_TOKEN: roleTokens ? merchantToken : "" },
     stdio: "ignore",
   });
   const base = `http://127.0.0.1:${port}`;
@@ -111,6 +113,23 @@ test("unexpected payment failure stops the story without later economic steps", 
     expect(app.backend.captureCalls).toBe(1);
     expect(app.backend.releaseCalls).toBe(0);
     expect(app.backend.refundCalls).toBe(0);
+  } finally { await app.dispose(); }
+}, 10000);
+
+test("MVP-01: the live bridge with per-role agent tokens runs the story without trusted-operator mode", async () => {
+  const app = await fixture("devnet", true, true);
+  try {
+    expect((await app.post("/api/story", { confirmedDevnet: true, delay: 0 })).status).toBe(202);
+    const waiting = await app.until(s => s.story.state === "awaiting-human" || s.story.state === "error");
+    expect(waiting.story.state).toBe("awaiting-human");
+    // The agent's self-approval attempts never reach the service but are still audited.
+    expect(waiting.timeline.filter((e: { kind: string }) => e.kind === "blocked").map((e: { code: string }) => e.code)).toEqual(["OVER_PER_TX_CAP", "COUNTERPARTY_NOT_ALLOWED", "OVER_BUDGET", "PRINCIPAL_FORBIDDEN", "PRINCIPAL_FORBIDDEN"]);
+    const audit = app.service.listAuditLog();
+    expect(audit.filter(e => e.action === "hold" && e.outcome === "ok").every(e => e.actor === payer)).toBe(true);
+    expect(audit.filter(e => e.action === "capture" && e.outcome === "ok").every(e => e.actor === merchant)).toBe(true);
+    expect((await app.post("/api/human/resolve", { disputeId: waiting.disputes[0].id, outcome: "refund", refundAmount: "4000000" })).body.ok).toBe(true);
+    expect((await app.state()).story.state).toBe("done");
+    expect(app.backend.holdCalls).toBe(2);
   } finally { await app.dispose(); }
 }, 10000);
 
