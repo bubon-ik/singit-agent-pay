@@ -161,7 +161,7 @@ async function refresh() {
     cardSignatures.set(name, signature);
     render();
   };
-  const mandate = s.mandates[0] ?? null;
+  const mandate = s.mandates.at(-1) ?? null;
   const reservation = activeReservation(s.ops, mandate?.id);
   renderIfChanged("mandate", { mandate, reservation: reservation.toString() }, () => renderMandate(mandate, s.ops));
   const opsCard = $("opsCard");
