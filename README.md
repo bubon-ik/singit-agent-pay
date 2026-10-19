@@ -10,10 +10,11 @@ Built at FinTechers Prague, Track 2 "Agents that pay each other", 19–20 Octobe
 
 | What | State |
 |---|---|
-| Demo on the mock backend (default) | Runs anywhere, no keys or network. All offline gates pass ([release gate](docs/RELEASE-GATE.md)) |
+| Demo on the mock backend (default) | Runs without live wallets or RPC. Label MOCK; candidate evidence and remaining gates are in the [release gate](docs/RELEASE-GATE.md) |
 | Capture402 devnet backend | Implemented against the pinned public ABI and tested offline. Earlier scripted devnet runs on older revisions finalized 4/4 direct operations and 13/13 dashboard → MCP → devnet steps (historical, see [#14](https://github.com/bubon-ik/singit-agent-pay/issues/14)) |
 | Real LLM agent paying on devnet (MVP-07) | Not run yet |
-| Live devnet Go/No-Go | **NO-GO** until that run is accepted; mock demo **GO**, labeled MOCK ([release gate](docs/RELEASE-GATE.md)) |
+| One limited devnet run | **NOT AUTHORIZED** until final offline readiness and separate operational approval ([release gate](docs/RELEASE-GATE.md)) |
+| Real-agent devnet MVP acceptance | **PENDING E2E** and explicit operator/reviewer acceptance; permission for one test is an earlier, separate gate |
 
 Solana devnet and devnet USDC only, never mainnet. Experimental and not audited.
 
@@ -49,6 +50,10 @@ sequenceDiagram
 The policy runs in the service; the money rules run on-chain. The capture402 program fixes the hold maximum and deadlines, and the payer can reclaim an unused hold after the capture deadline without the seller. A dispute is a rule of this service, not an on-chain freeze. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Payment safety
+
+The agreed narrow workflow and ordered acceptance gates are in
+[MVP-SCENARIO.md](docs/MVP-SCENARIO.md). Journal compatibility and read-only
+diagnosis when startup refuses are documented in [JOURNAL.md](docs/JOURNAL.md).
 
 Payments fail in messy ways: lost responses, timeouts, crashes between "sent" and "saved". The server is built so that none of these turns into a second payment.
 

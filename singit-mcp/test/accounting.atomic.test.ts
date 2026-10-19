@@ -12,7 +12,7 @@ import { expect, test, vi } from "vitest";
 import type { AuditEntry } from "../src/audit.js";
 import { MockBackend } from "../src/backend/mock.js";
 import { PaymentService } from "../src/service.js";
-import { FileStateStore, type OpCommit, type OperationRecord, type StateStore, type StoredDispute, type StoredHold, type StoredMandate } from "../src/store.js";
+import { FileStateStore, type OpCommit, type OperationRecord, type StateCommit, type StateStore, type StoredDispute, type StoredHold, type StoredMandate } from "../src/store.js";
 
 const PAYER = "payer";
 const PAYEE = "payee";
@@ -57,6 +57,7 @@ class CrashingStore implements StateStore {
   appendAudit(e: AuditEntry) {
     this.inner.appendAudit(e);
   }
+  putStateCommit(c: StateCommit) { this.inner.putStateCommit(c); }
 }
 
 function mandateArgs(now: () => number, totalBudget = 1_000_000n) {

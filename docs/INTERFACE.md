@@ -1,4 +1,4 @@
-<!-- Mirror of singit-mcp/INTERFACE.md. Edit the source; this copy is regenerated. -->
+<!-- Reference copy. Canonical backend interface: ../singit-mcp/INTERFACE.md. -->
 # PaymentBackend contract (for the capture402 integration)
 
 Implement `PaymentBackend` from [`src/backend/types.ts`](../singit-mcp/src/backend/types.ts). The MCP server checks every
@@ -118,6 +118,18 @@ Schema: `AuditEntry` in [`src/audit.ts`](../singit-mcp/src/audit.ts). Fields are
 
 Keys: devnet throwaway keypairs generated locally by the team, loaded from env (`SINGIT_PAYER_KEYPAIR` / `SINGIT_MERCHANT_KEYPAIR`), never committed; agents never see keys. Never real or mainnet keys.
 
+## Journal v2 and blocked-state inspection
+
+Terminal operations, accounting and an `operation_outcome` audit proof commit
+atomically; associated human decisions are included. Audit v1 adds optional
+`operationId`, `operationAction`, `operationState` and `recovered` fields on these
+proofs. Business-call audit rows remain separate. A verified deployment/network/mint
+mismatch closes admission until reviewed restart, including when found by a read.
+Corrupt/unsupported or ambiguous legacy records stop startup without truncation.
+The offline inspection CLI reports aggregate counts only and never opens admission.
+See [JOURNAL.md](JOURNAL.md) for compatibility and diagnosis and
+[MVP-SCENARIO.md](MVP-SCENARIO.md) for the agreed workflow and ordered gates.
+
 ## MCP tools (schemas: `toolSchemas` in [`src/server.ts`](../singit-mcp/src/server.ts), zod)
 
 Amounts are base-unit decimal strings (`"2500000"` = 2.5 USDC). Times are integer unix seconds. Every write takes `actor`, the calling agent's id/address. The audit `action` is exactly the tool name. **`hold` is the pay tool**; there is no separate `pay`.
@@ -170,7 +182,7 @@ Local-only MVP: the server binds `127.0.0.1`; one buyer, one merchant, one human
 - **One intent = one `idempotencyKey`.** `hold`, `capture`, `release`, `refund` and `resolve_dispute` take an optional `idempotencyKey` (1-128 chars of `[A-Za-z0-9._:-]`); live mode refuses a missing one with `IDEMPOTENCY_KEY_REQUIRED` before any send. The client generates it once per intent and resends it unchanged on every retry. The key is scoped to the trusted principal and the action; the same key with different parameters is `IDEMPOTENCY_KEY_REUSED`.
 - **Replay first.** After authorization, the key is looked up before any check that only applies to a new operation (held amount, refundable, deadlines). A retry after success returns the original outcome (`replay: true`, same `operationId`, the hold exactly as that operation left it), even after a full capture, a release or a passed deadline. A concurrent identical request gets `OPERATION_PENDING` with the in-flight `operationId`; it never sends twice.
 - **`operationId` everywhere.** Successful economic results carry `operationId`; `OPERATION_UNKNOWN`, `OPERATION_PENDING`, `IDEMPOTENCY_KEY_REUSED` and journaled failures carry it in the refusal. `get_operation {operationId}` returns the redacted public status (no wire, salt, evidence or params hash) and only for the caller's own mandates. After a lost response, observe the original operation; the server never refreshes salt/blockhash or resubmits.
-- **Fail-closed admission.** An UNKNOWN outcome (live), any failed durable journal write (`STORAGE_FAILURE`, all modes) or shutdown closes economic write admission: new `create_mandate`/`hold`/`capture`/`release`/`refund`/`resolve_dispute` operations are refused with `ADMISSION_CLOSED`, while reads, `get_operation` and keyed replays keep working. Only a restart reopens it, and live startup refuses while any original outcome is unresolved. The hold reservation and its pending op are journaled in one record; a journal failure before the send means nothing is sent.
+- **Fail-closed admission.** A verified deployment/network/mint identity mismatch, an UNKNOWN outcome (live), any failed durable journal write (`STORAGE_FAILURE`, all modes) or shutdown closes economic write admission: new `create_mandate`/`hold`/`capture`/`release`/`refund`/`resolve_dispute` operations are refused with `ADMISSION_CLOSED`, while reads, `get_operation` and keyed replays keep working. Only a restart reopens it, and live startup refuses while any original outcome is unresolved. The hold reservation and its pending op are journaled in one record; a journal failure before the send means nothing is sent.
 - **Liveness vs readiness.** `GET /health` only says the process answers. `GET /ready` reports economic readiness `{ready, backend, admission: {open, code, reason, unresolvedOps}}` (200 when ready, 503 otherwise; counts and reason codes only). Live backends require the `x-singit-human-secret` header for it.
 - **One writer per economic namespace.** Besides the state-directory lock, a live runtime takes an exclusive lock for its program + payer + merchant in `SINGIT_NAMESPACE_LOCK_DIR` (default `~/.singit-mcp/locks`), so a second runtime with the same wallets refuses (`NAMESPACE_LOCKED`) even with another `SINGIT_STATE_DIR`. It does not coordinate separate hosts. Locks are never removed by age.
 - **No guessed cleanup.** On-chain `held == 0` is never read as repayment (a capture empties a hold too); a cleanup op stays `unknown` with its reservation until its own transaction is proven. Live mode sends no automatic cleanup release: a wrong-terms hold is quarantined with its amount still committed.

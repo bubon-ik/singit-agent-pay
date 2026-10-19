@@ -31,6 +31,7 @@ async function mandate(runtime: Awaited<ReturnType<typeof start>>) {
 afterEach(() => {
   for (const runtime of runtimes.splice(0)) runtime.close();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  vi.restoreAllMocks();
 });
 
 test("live startup requires an absolute private directory outside Git", async () => {
@@ -166,4 +167,18 @@ test("mock startup keeps its ephemeral ledger and rejects misleading durable con
   runtimes.push(runtime);
   expect(runtime.backendName).toBe("mock");
   await expect(createServiceRuntime({ SINGIT_STATE_DIR: directory() }, { backend: backend() })).rejects.toMatchObject({ code: "MOCK_STATE_NOT_DURABLE" });
+});
+
+test.each(["putOpCommit", "appendAudit"] as const)("a %s failure swallowed by best-effort reconciliation still refuses startup admission", async method => {
+  const dir = directory(), paymentBackend = backend();
+  const first = await start(dir, paymentBackend), m = await mandate(first);
+  paymentBackend.queueHoldFault("ambiguous-before");
+  await expect(first.service.hold({ actor: payer, mandateId: m.id, payee, amount: 400_000n, idempotencyKey: "original" })).rejects.toMatchObject({ code: "OPERATION_UNKNOWN" });
+  first.close();
+  vi.spyOn(FileStateStore.prototype, method).mockImplementation(() => { throw Error("synthetic storage failure during recovery"); });
+  await expect(start(dir, paymentBackend)).rejects.toMatchObject({ code: "STARTUP_ADMISSION_CLOSED" });
+  expect(paymentBackend.holdCalls).toBe(1);
+  expect(new FileStateStore(dir).load().ops[0]).toMatchObject(method === "putOpCommit"
+    ? { state: "unknown", reservation: "400000" } : { state: "failed", reservation: "0" });
+  expect(existsSync(join(dir, ".singit-mcp.lock"))).toBe(false);
 });

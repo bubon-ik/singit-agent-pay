@@ -473,7 +473,13 @@ test("audit log entries are schema-complete and tx-stamped for money ops", async
 
   for (const entry of entries) {
     expect(entry.v).toBe(1);
-    expect(Object.keys(entry).sort()).toEqual(expectedKeys);
+    const extensions = entry.action === "operation_outcome" ? ["operationId", "operationAction", "operationState", ...(entry.recovered ? ["recovered"] : [])] : [];
+    expect(Object.keys(entry).sort()).toEqual([...expectedKeys, ...extensions].sort());
+    if (entry.action === "operation_outcome") {
+      expect(entry.operationId).toMatch(/^op-/);
+      expect(entry.operationState).toBe("succeeded");
+      expect(entry.txSig).not.toBeNull();
+    }
     if (entry.outcome === "ok" && ["hold", "capture", "release", "refund"].includes(entry.action)) {
       expect(entry.txSig).not.toBeNull();
     }

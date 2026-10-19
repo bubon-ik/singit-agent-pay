@@ -20,9 +20,12 @@ import { AUDIT_SCHEMA_VERSION, type AuditAction, type AuditEntry, type RefusalCo
 import {
   MemoryStateStore,
   type OpAction,
+  type OpCommit,
   type OperationRecord,
   type OpState,
   type StateStore,
+  type StateCommit,
+  type Snapshot,
   type StoredDispute,
   type StoredHold,
   type StoredMandate,
@@ -129,24 +132,39 @@ export interface PaymentServiceOptions {
   live?: boolean;
 }
 
-/** Wraps every durable write so a failed append (disk full, EIO, fsync error) closes economic
- * write admission and surfaces as STORAGE_FAILURE instead of an unclassified crash (MVP-04). */
-function guardStore(store: StateStore, onFailure: () => Refusal): StateStore {
-  const guarded = <T>(write: (value: T) => void) => (value: T) => {
+/** A failed append may have reached disk: keep only writes that returned successfully as the
+ * process's conservative read view. Never retry writes through a failed facade. Restart must
+ * inspect the actual journal to establish whether the uncertain append became durable. */
+function guardStore(store: StateStore, onFailure: (confirmed: Snapshot) => Refusal): StateStore {
+  const confirmed = new MemoryStateStore();
+  const initial = store.load();
+  for (const mandate of initial.mandates) confirmed.putMandate(mandate);
+  for (const hold of initial.holds) confirmed.putHold(hold);
+  for (const dispute of initial.disputes) confirmed.putDispute(dispute);
+  for (const op of initial.ops) confirmed.putOp(op);
+  for (const audit of initial.audit) confirmed.appendAudit(audit);
+  let failed = false;
+  const guarded = <T>(write: (value: T) => void, remember: (value: T) => void) => (value: T) => {
+    // A callback already in flight may mutate its old objects after the first failure.
+    // Restore the confirmed view on every refused write without touching the underlying store.
+    if (failed) throw onFailure(confirmed.load());
     try {
       write(value);
+      remember(value);
     } catch {
-      throw onFailure();
+      failed = true;
+      throw onFailure(confirmed.load());
     }
   };
   return {
-    load: () => store.load(),
-    putMandate: guarded((m) => store.putMandate(m)),
-    putHold: guarded((h) => store.putHold(h)),
-    putDispute: guarded((d) => store.putDispute(d)),
-    putOp: guarded((op) => store.putOp(op)),
-    putOpCommit: guarded((c) => store.putOpCommit(c)),
-    appendAudit: guarded((e) => store.appendAudit(e)),
+    load: () => confirmed.load(),
+    putMandate: guarded((m: StoredMandate) => store.putMandate(m), m => confirmed.putMandate(m)),
+    putHold: guarded((h: StoredHold) => store.putHold(h), h => confirmed.putHold(h)),
+    putDispute: guarded((d: StoredDispute) => store.putDispute(d), d => confirmed.putDispute(d)),
+    putOp: guarded((op: OperationRecord) => store.putOp(op), op => confirmed.putOp(op)),
+    putOpCommit: guarded((c: OpCommit) => store.putOpCommit(c), c => confirmed.putOpCommit(c)),
+    putStateCommit: guarded((c: StateCommit) => store.putStateCommit(c), c => confirmed.putStateCommit(c)),
+    appendAudit: guarded((e: AuditEntry) => store.appendAudit(e), e => confirmed.appendAudit(e)),
   };
 }
 
@@ -368,6 +386,12 @@ const RECONCILE_KIND: Record<OpAction, "hold" | "capture" | "release" | "refund"
   cleanup_release: "release",
 };
 
+type AuditFields = {
+  mandateId?: string | null; holdId?: string | null; disputeId?: string | null;
+  amount?: bigint | null; txSig?: string | null; held?: bigint | null; refundable?: bigint | null;
+  operationId?: string; operationAction?: string; operationState?: "succeeded" | "failed"; recovered?: boolean;
+};
+
 export class PaymentService {
   private readonly backend: PaymentBackend;
   private readonly now: () => number;
@@ -378,6 +402,10 @@ export class PaymentService {
   /** Set once economic writes must stop (MVP-04). Reads, replays and observation keep working;
    * only a restart (whose startup reconciliation must pass) reopens admission. */
   private admission: { code: RefusalCode; reason: string } | null = null;
+  private storageFailed = false;
+  private shuttingDown = false;
+  private activeCalls = 0;
+  private afterDrain?: () => void;
 
   private readonly mandates = new Map<string, Mandate>();
   private readonly holds = new Map<string, Hold>();
@@ -416,14 +444,42 @@ export class PaymentService {
     return run;
   }
 
+  /** Track the whole public call, including its terminal commit and business audit. Keeping
+   * custody until backend settlement alone would still race the last local journal writes. */
+  private async withActiveCall<T>(call: () => Promise<T>): Promise<T> {
+    if (this.shuttingDown) throw new Refusal("ADMISSION_CLOSED", "BLOCKED: runtime is shutting down");
+    this.activeCalls++;
+    try { return await call(); }
+    finally {
+      this.activeCalls--;
+      if (this.activeCalls === 0 && this.afterDrain) {
+        const release = this.afterDrain;
+        this.afterDrain = undefined;
+        release();
+      }
+    }
+  }
+
+  /** Synchronous when idle (including process exit); otherwise retain custody until accepted
+   * calls drain. A process killed mid-call leaves its locks for explicit operator inspection. */
+  shutdown(releaseCustody: () => void): void {
+    if (this.shuttingDown) return;
+    this.shuttingDown = true;
+    this.closeAdmission("ADMISSION_CLOSED", "runtime is shutting down");
+    if (this.activeCalls === 0) releaseCustody();
+    else this.afterDrain = releaseCustody;
+  }
+
   constructor(opts: PaymentServiceOptions) {
     this.backend = opts.backend;
     this.now = opts.now ?? (() => Math.floor(Date.now() / 1000));
     this.approvalSecret = opts.approvalSecret;
     this.mint = opts.mint ?? DEVNET_USDC_MINT;
     this.live = opts.live ?? false;
-    this.store = guardStore(opts.store ?? new MemoryStateStore(), () => {
+    this.store = guardStore(opts.store ?? new MemoryStateStore(), confirmed => {
+      this.storageFailed = true;
       this.closeAdmission("STORAGE_FAILURE", "a durable journal write failed");
+      this.restoreSnapshot(confirmed);
       return new Refusal(
         "STORAGE_FAILURE",
         "BLOCKED: a durable journal write failed; economic writes are closed until an operator inspects the store and restarts",
@@ -431,6 +487,37 @@ export class PaymentService {
     });
 
     const snapshot = this.store.load();
+    this.restoreSnapshot(snapshot);
+
+    // Compatible v1 atomic outcomes need only an audit backfill, never an accounting replay.
+    const audited = new Set(snapshot.audit.filter(e => e.action === "operation_outcome").map(e => e.operationId));
+    for (const op of this.ops.values()) {
+      if ((op.state === "succeeded" || op.state === "failed") && !audited.has(op.id)) {
+        const entry = this.terminalAudit(op, true);
+        this.store.appendAudit(entry);
+        this.auditLog.push(entry);
+      }
+    }
+    // A process that died mid-call leaves its op "pending": indistinguishable from an ambiguous
+    // backend response, so treat it the same way (reconcile later decides succeeded/failed).
+    for (const op of this.ops.values()) {
+      if (op.state === "pending") {
+        op.state = "unknown";
+        op.updatedAt = this.now();
+        this.store.putOp(op);
+        this.recordReconcile(op, "pending", "unknown", "pending op found at restart (process died mid-call); treated as unknown pending reconcile");
+      }
+    }
+  }
+
+  private restoreSnapshot(snapshot: Snapshot): void {
+    this.mandates.clear();
+    this.holds.clear();
+    this.disputes.clear();
+    this.ops.clear();
+    this.idempotencyIndex.clear();
+    this.holdLocks.clear();
+    this.auditLog.length = 0;
     this.mandateSeq = snapshot.seqs.mandateSeq;
     this.disputeSeq = snapshot.seqs.disputeSeq;
     this.opSeq = snapshot.seqs.opSeq;
@@ -447,58 +534,68 @@ export class PaymentService {
         this.holdLocks.set(op.holdId, op.id);
       }
     }
-    // A process that died mid-call leaves its op "pending": indistinguishable from an ambiguous
-    // backend response, so treat it the same way (reconcile later decides succeeded/failed).
-    for (const op of this.ops.values()) {
-      if (op.state === "pending") {
-        op.state = "unknown";
-        op.updatedAt = this.now();
-        this.store.putOp(op);
-        this.recordReconcile(op, "pending", "unknown", "pending op found at restart (process died mid-call); treated as unknown pending reconcile");
-      }
+  }
+
+  private makeAudit(action: AuditAction, actor: string, outcome: AuditEntry["outcome"], code: RefusalCode | null,
+    reason: string, fields: AuditFields = {}): AuditEntry {
+    return {
+      v: AUDIT_SCHEMA_VERSION, seq: ++this.auditSeq, ts: new Date(this.now() * 1000).toISOString(),
+      actor, action, outcome, code, reason, mandateId: fields.mandateId ?? null, holdId: fields.holdId ?? null,
+      disputeId: fields.disputeId ?? null, amount: fields.amount != null ? fields.amount.toString() : null,
+      txSig: fields.txSig ?? null, held: fields.held != null ? fields.held.toString() : null,
+      refundable: fields.refundable != null ? fields.refundable.toString() : null,
+      ...(fields.operationId ? { operationId: fields.operationId, operationAction: fields.operationAction,
+        operationState: fields.operationState, ...(fields.recovered ? { recovered: true } : {}) } : {}),
+    };
+  }
+
+  private record(action: AuditAction, actor: string, outcome: AuditEntry["outcome"], code: RefusalCode | null,
+    reason: string, fields: AuditFields = {}, state?: Omit<StateCommit, "audit">): void {
+    // Transport refusal/reset callbacks can retain the old service after custody was released.
+    if (this.shuttingDown && this.activeCalls === 0) return;
+    const entry = this.makeAudit(action, actor, outcome, code, reason, fields);
+    if (state) {
+      this.store.putStateCommit({ ...state, audit: entry });
+      this.auditLog.push(entry);
+      return;
+    }
+    this.auditLog.push(entry);
+    try { this.store.appendAudit(entry); } catch {
+      // Admission is closed by guardStore; a secondary audit failure cannot hide the original refusal.
+      // Successful economics already have their terminal proof in the atomic op commit.
     }
   }
 
-  private record(
-    action: AuditAction,
-    actor: string,
-    outcome: AuditEntry["outcome"],
-    code: RefusalCode | null,
-    reason: string,
-    fields: {
-      mandateId?: string | null;
-      holdId?: string | null;
-      disputeId?: string | null;
-      amount?: bigint | null;
-      txSig?: string | null;
-      held?: bigint | null;
-      refundable?: bigint | null;
-    } = {},
-  ): void {
-    const entry: AuditEntry = {
-      v: AUDIT_SCHEMA_VERSION,
-      seq: ++this.auditSeq,
-      ts: new Date(this.now() * 1000).toISOString(),
-      actor,
-      action,
-      outcome,
-      code,
-      reason,
-      mandateId: fields.mandateId ?? null,
-      holdId: fields.holdId ?? null,
-      disputeId: fields.disputeId ?? null,
-      amount: fields.amount != null ? fields.amount.toString() : null,
-      txSig: fields.txSig ?? null,
-      held: fields.held != null ? fields.held.toString() : null,
-      refundable: fields.refundable != null ? fields.refundable.toString() : null,
-    };
-    this.auditLog.push(entry);
-    try {
-      this.store.appendAudit(entry);
-    } catch {
-      // The guarded store already closed admission. Keep the entry in memory and let the
-      // refusal that caused this record surface instead of a secondary audit-write error.
-    }
+  private terminalAudit(op: OperationRecord, recovered = false): AuditEntry {
+    const hold = op.result?.hold ?? (op.holdId ? this.holds.get(op.holdId) : undefined);
+    const rawAmount = op.params.amount;
+    return this.makeAudit("operation_outcome", op.actor, op.state === "succeeded" ? "ok" : "error",
+      op.state === "failed" ? (op.error?.refusalCode ?? "BACKEND_ERROR") : null,
+      `op ${op.id} (${op.action}) ${op.state}${recovered ? "; historical terminal record, audit recovered without accounting replay" : "; original outcome and accounting committed together"}`,
+      { mandateId: op.mandateId, holdId: op.holdId, disputeId: op.disputeId ?? (typeof op.params.disputeId === "string" ? op.params.disputeId : null),
+        amount: typeof rawAmount === "string" && /^(0|[1-9][0-9]*)$/.test(rawAmount) ? BigInt(rawAmount) : null,
+        txSig: op.result?.txSig ?? op.prepared?.txSig ?? null, held: hold ? BigInt(hold.held) : null,
+        refundable: hold ? BigInt(hold.captured) - BigInt(hold.refunded) : null,
+        operationId: op.id, operationAction: op.action, operationState: op.state as "succeeded" | "failed", recovered });
+  }
+
+  private commitTerminal(op: OperationRecord, state: { hold?: Hold; mandate?: Mandate; dispute?: Dispute } = {}): void {
+    const audit = this.terminalAudit(op);
+    this.store.putOpCommit({ op, audit, hold: state.hold ? serializeHold(state.hold) : undefined,
+      mandate: state.mandate ? serializeMandate(state.mandate) : undefined,
+      dispute: state.dispute ? serializeDispute(state.dispute) : undefined });
+    this.auditLog.push(audit);
+  }
+
+  private commitFailed(op: OperationRecord): void {
+    op.state = "failed";
+    op.updatedAt = this.now();
+    const reservation = BigInt(op.reservation);
+    const mandate = reservation > 0n && op.action !== "cleanup_release" ? this.mandates.get(op.mandateId) : undefined;
+    if (mandate) mandate.committed -= reservation;
+    if (op.action !== "cleanup_release") op.reservation = "0";
+    this.commitTerminal(op, { mandate });
+    if (op.holdId && this.holdLocks.get(op.holdId) === op.id) this.holdLocks.delete(op.holdId);
   }
 
   /** Stops new economic writes (idempotent: the first reason wins). Reads and replays continue. */
@@ -622,29 +719,30 @@ export class PaymentService {
    */
   private async submit<T>(op: OperationRecord, holdIdForLock: string | null, call: (ctx: SubmitContext) => Promise<T>): Promise<T> {
     // op stays in `inFlight` after this returns; the caller removes it once the outcome is committed.
+    let invoked = false;
     try {
-      return await this.withBackendLock(() =>
-        call({
+      return await this.withBackendLock(() => {
+        this.assertAdmission(); // A queued call must recheck a failure discovered by its predecessor.
+        invoked = true;
+        return call({
           onPrepared: (p) => {
             op.prepared = p;
             op.updatedAt = this.now();
             this.store.putOp(op);
           },
-        }),
-      );
+        });
+      });
     } catch (err) {
       op.updatedAt = this.now();
-      if (err instanceof BackendError) {
+      if (err instanceof BackendError || (!invoked && err instanceof Refusal)) {
         const refusal = toRefusal(err);
-        op.state = "failed";
         op.error = {
           code: err.code,
           message: err.message,
           refusalCode: refusal.code,
         };
-        if (holdIdForLock && this.holdLocks.get(holdIdForLock) === op.id) this.holdLocks.delete(holdIdForLock);
-        this.store.putOp(op);
-        throw refusal;
+        this.commitFailed(op);
+        throw new Refusal(refusal.code, refusal.message, op.id);
       }
       op.state = "unknown";
       if (this.live) this.closeAdmission("ADMISSION_CLOSED", `operation ${op.id} (${op.action}) has an UNKNOWN outcome`);
@@ -671,22 +769,33 @@ export class PaymentService {
     holdIdForLock: string | null,
     mutated?: { hold?: Hold; mandate?: Mandate },
   ): void {
+    const resolution = op.params.resolution as { refundAmount?: string; final?: boolean } | undefined;
+    const resolving = op.action === "resolve_release" || op.action === "resolve_refund";
+    const resolvedDispute = typeof op.params.disputeId === "string" ? this.disputes.get(op.params.disputeId) : undefined;
+    if (resolving && (!resolvedDispute || !resolution || typeof resolution.refundAmount !== "string" ||
+        !/^(0|[1-9][0-9]*)$/.test(resolution.refundAmount) || typeof resolution.final !== "boolean")) {
+      this.closeAdmission("ADMISSION_CLOSED", "original human decision metadata requires operator review");
+      throw new Refusal("OPERATION_UNKNOWN", "Human decision metadata is missing; original outcome retained for operator review", op.id);
+    }
     op.state = "succeeded";
     // Confirmed holds are represented by mandate.committed; only unresolved holds
     // count as reservations in the operation journal.
     op.reservation = "0";
     op.result = mutated?.hold ? { ...result, hold: serializeHold(mutated.hold) } : result;
     op.updatedAt = this.now();
-    if (holdIdForLock && this.holdLocks.get(holdIdForLock) === op.id) this.holdLocks.delete(holdIdForLock);
-    if (mutated?.hold || mutated?.mandate) {
-      this.store.putOpCommit({
-        op,
-        hold: mutated.hold ? serializeHold(mutated.hold) : undefined,
-        mandate: mutated.mandate ? serializeMandate(mutated.mandate) : undefined,
-      });
-    } else {
-      this.store.putOp(op);
+    let dispute: Dispute | undefined;
+    if (resolving) {
+      dispute = resolvedDispute!;
+      if (result.txSig && !dispute.txSigs.includes(result.txSig)) dispute.txSigs.push(result.txSig);
+      if (resolution!.final) {
+        dispute.status = "resolved";
+        dispute.outcome = "refund";
+        dispute.refundAmount = BigInt(resolution!.refundAmount!);
+        dispute.resolvedAt = op.updatedAt;
+      }
     }
+    this.commitTerminal(op, { ...mutated, dispute });
+    if (holdIdForLock && this.holdLocks.get(holdIdForLock) === op.id) this.holdLocks.delete(holdIdForLock);
   }
 
   /**
@@ -705,6 +814,9 @@ export class PaymentService {
       throw new Refusal("OPERATION_PENDING", `BLOCKED: operation ${op.id} for this idempotency key is still in progress; retry with the same key`, op.id);
     }
     if (op.state === "pending" || op.state === "unknown") {
+      if (this.storageFailed) {
+        throw new Refusal("STORAGE_FAILURE", "BLOCKED: inspect the journal and restart before reconciling the original outcome", op.id);
+      }
       await this.reconcile(op.id);
       op = this.ops.get(existingOpId)!;
     }
@@ -786,7 +898,6 @@ export class PaymentService {
    * means the original (wrong-mint) hold is still genuinely held on-chain, so its budget must
    * stay reserved rather than be freed on a mere cleanup-attempt failure. */
   private finalizeOpFailedByReconcile(op: OperationRecord, outcome: Extract<TxOutcome, { status: "not_found" } | { status: "failed" }>): void {
-    op.state = "failed";
     op.error =
       outcome.status === "failed"
         ? {
@@ -799,18 +910,7 @@ export class PaymentService {
             message: "transaction not found on-chain (blockhash expired or never sent); treated as not executed",
             refusalCode: "BACKEND_ERROR",
           };
-    op.updatedAt = this.now();
-    if (op.holdId && this.holdLocks.get(op.holdId) === op.id) this.holdLocks.delete(op.holdId);
-
-    const reservation = BigInt(op.reservation);
-    if (reservation > 0n && op.action !== "cleanup_release") {
-      const mandate = this.mandates.get(op.mandateId);
-      if (mandate) {
-        mandate.committed -= reservation;
-        this.store.putMandate(serializeMandate(mandate));
-      }
-    }
-    this.store.putOp(op);
+    this.commitFailed(op);
   }
 
   /** Computes the action-specific hold/mandate mutation once reconcile has confirmed an op
@@ -876,6 +976,10 @@ export class PaymentService {
     }
 
     const mandate = this.applyHoldMutationForOp(op, hold);
+    if (txSig) {
+      if (!hold.txSigs.includes(txSig)) hold.txSigs.push(txSig);
+      hold.lastTxSig = txSig;
+    }
     this.finalizeOpSucceeded(op, { txSig }, op.holdId, { hold, mandate });
     return true;
   }
@@ -969,10 +1073,11 @@ export class PaymentService {
         // reclaim after captureDeadline or a separately approved release, never a server resend.
         hold.quarantined = true;
         this.holds.set(holdId, hold);
-        this.store.putOpCommit({ op, hold: serializeHold(hold) });
+        op.result = { ...op.result, hold: serializeHold(hold) };
+        this.commitTerminal(op, { hold });
         return { kind: "wrong_mint", cleanupSucceeded: false, cleanupDisabled: true, statusMint: status.mint ?? null };
       }
-      this.store.putOp(op);
+      this.commitTerminal(op);
 
       const cleanupCanonical = canonicalize({ holdId, expectedHeld: amount, expectedRefundable: 0n });
       const cleanupOp = this.beginOp({
@@ -1050,6 +1155,8 @@ export class PaymentService {
           },
         ),
       );
+      if (!hold.txSigs.includes(receipt.txSig)) hold.txSigs.push(receipt.txSig);
+      hold.lastTxSig = receipt.txSig;
       hold.held = 0n;
       const mandate = this.mandates.get(cleanupOp.mandateId);
       if (mandate) mandate.committed -= BigInt(cleanupOp.reservation);
@@ -1145,9 +1252,16 @@ export class PaymentService {
    * backend call is still actively in flight in this process (see `inFlight`): racing that call
    * is exactly how a devnet getTxOutcome saying not_found before send would cause a double-free. */
   async reconcile(opId: string, options: { readOnly?: boolean } = {}): Promise<OperationRecord> {
+    return this.withActiveCall(() => this.reconcileCall(opId, options));
+  }
+
+  private async reconcileCall(opId: string, options: { readOnly?: boolean }): Promise<OperationRecord> {
     const op = this.ops.get(opId);
     if (!op) throw new Refusal("INVALID_INPUT", `BLOCKED: unknown operation ${opId}`);
     if (op.state === "succeeded" || op.state === "failed") return op;
+    if (this.storageFailed) {
+      throw new Refusal("STORAGE_FAILURE", "BLOCKED: inspect the journal and restart before reconciling the original outcome", op.id);
+    }
     if (this.inFlight.has(op.id)) return op;
     // Own the op for the whole reconcile: two overlapping reconciles (e.g. two concurrent replays
     // of one key) would otherwise each apply its delta after their getTxOutcome/getStatus awaits.
@@ -1338,9 +1452,13 @@ export class PaymentService {
     this.record("reset", actor, "ok", null, "state reset to defaults (mock backend)", {});
   }
 
-  // ---- writes (exactly one audit entry each) ----
+  // ---- writes (business-call audit plus a separately committed terminal proof) ----
 
   async createMandate(args: CreateMandateArgs): Promise<Mandate> {
+    return this.withActiveCall(() => this.createMandateCall(args));
+  }
+
+  private async createMandateCall(args: CreateMandateArgs): Promise<Mandate> {
     const { actor, payer, totalBudget, perTxCap, expiresAt, allowedCounterparties, note } = args;
     try {
       this.assertAdmission();
@@ -1377,7 +1495,6 @@ export class PaymentService {
         note,
       };
       this.mandates.set(id, mandate);
-      this.store.putMandate(serializeMandate(mandate));
       this.record(
         "create_mandate",
         actor,
@@ -1385,6 +1502,7 @@ export class PaymentService {
         null,
         `created mandate ${id} for payer ${payer}: budget ${formatUsdc(totalBudget)}, per-tx cap ${formatUsdc(perTxCap)}`,
         { mandateId: id, txSig: result.ref ?? null, amount: totalBudget },
+        { mandate: serializeMandate(mandate) },
       );
       return mandate;
     } catch (err) {
@@ -1414,6 +1532,10 @@ export class PaymentService {
   }
 
   async holdOp(args: HoldArgs): Promise<OpOutcome> {
+    return this.withActiveCall(() => this.holdCall(args));
+  }
+
+  private async holdCall(args: HoldArgs): Promise<OpOutcome> {
     const { actor, mandateId, payee, amount, mint, captureDeadline, refundDeadline, idempotencyKey } = args;
     let holdId: string | null = null;
     let txSig: string | null = null;
@@ -1585,6 +1707,10 @@ export class PaymentService {
   }
 
   async captureOp(args: CaptureArgs): Promise<OpOutcome> {
+    return this.withActiveCall(() => this.captureCall(args));
+  }
+
+  private async captureCall(args: CaptureArgs): Promise<OpOutcome> {
     const { actor, holdId, amount, releaseRemainder, idempotencyKey } = args;
     let txSig: string | null = null;
     try {
@@ -1668,6 +1794,10 @@ export class PaymentService {
   }
 
   async releaseOp(args: ReleaseArgs): Promise<OpOutcome> {
+    return this.withActiveCall(() => this.releaseCall(args));
+  }
+
+  private async releaseCall(args: ReleaseArgs): Promise<OpOutcome> {
     const { actor, holdId, idempotencyKey } = args;
     let txSig: string | null = null;
     try {
@@ -1734,6 +1864,10 @@ export class PaymentService {
   }
 
   async refundOp(args: RefundArgs): Promise<OpOutcome> {
+    return this.withActiveCall(() => this.refundCall(args));
+  }
+
+  private async refundCall(args: RefundArgs): Promise<OpOutcome> {
     const { actor, holdId, amount, idempotencyKey } = args;
     let txSig: string | null = null;
     try {
@@ -1799,6 +1933,10 @@ export class PaymentService {
   }
 
   async openDispute(args: OpenDisputeArgs): Promise<Dispute> {
+    return this.withActiveCall(() => this.openDisputeCall(args));
+  }
+
+  private async openDisputeCall(args: OpenDisputeArgs): Promise<Dispute> {
     const { actor, holdId, reason, evidence } = args;
     try {
       const hold = this.holds.get(holdId);
@@ -1826,16 +1964,13 @@ export class PaymentService {
       };
       this.disputes.set(id, dispute);
       hold.disputeId = id;
-      this.store.putDispute(serializeDispute(dispute));
-      this.store.putHold(serializeHold(hold));
-
       this.record("open_dispute", actor, "ok", null, `dispute opened on hold ${holdId}: ${reason}`, {
         mandateId: hold.mandateId,
         holdId,
         disputeId: id,
         held: hold.held,
         refundable: hold.captured - hold.refunded,
-      });
+      }, { dispute: serializeDispute(dispute), hold: serializeHold(hold) });
       return dispute;
     } catch (err) {
       const refusal = toRefusal(err);
@@ -1851,6 +1986,10 @@ export class PaymentService {
   }
 
   async resolveDispute(args: ResolveDisputeArgs): Promise<Dispute> {
+    return this.withActiveCall(() => this.resolveDisputeCall(args));
+  }
+
+  private async resolveDisputeCall(args: ResolveDisputeArgs): Promise<Dispute> {
     const { actor, disputeId, outcome, refundAmount, approvalToken, idempotencyKey } = args;
     let auditActor = actor;
     let txSig: string | null = null;
@@ -1901,14 +2040,13 @@ export class PaymentService {
         dispute.status = "resolved";
         dispute.outcome = "reject";
         dispute.resolvedAt = this.now();
-        this.store.putDispute(serializeDispute(dispute));
         this.record("resolve_dispute", auditActor, "ok", null, `dispute ${disputeId} resolved: rejected`, {
           mandateId: hold.mandateId,
           holdId: hold.id,
           disputeId,
           held: hold.held,
           refundable: hold.captured - hold.refunded,
-        });
+        }, { dispute: serializeDispute(dispute) });
         return dispute;
       }
 
@@ -1943,14 +2081,13 @@ export class PaymentService {
           actor,
           idempotencyKey,
           hold,
-          canonicalParams: { disputeId, holdId: hold.id },
+          canonicalParams: { disputeId, holdId: hold.id, resolution: { refundAmount: requested.toString(), final: requested === 0n } },
           expected: { held: "0", refundable: expectedRefundable.toString() },
           call: (ctx) => this.backend.release({ holdId: hold.id, expectedHeld, expectedRefundable }, ctx),
           applyMutation: (receipt) => {
             releaseTxSig = receipt.txSig;
             hold.txSigs.push(receipt.txSig);
             hold.lastTxSig = receipt.txSig;
-            dispute.txSigs.push(receipt.txSig);
             const released = hold.held;
             hold.held = 0n;
             const mandate = this.mandates.get(hold.mandateId);
@@ -1975,14 +2112,13 @@ export class PaymentService {
           actor,
           idempotencyKey,
           hold,
-          canonicalParams: { disputeId, holdId: hold.id, amount: requested },
+          canonicalParams: { disputeId, holdId: hold.id, amount: requested, resolution: { refundAmount: requested.toString(), final: true } },
           expected: { held: expectedHeld.toString(), refundable: (refundable - requested).toString() },
           call: (ctx) => this.backend.refund({ holdId: hold.id, amount: requested, expectedHeld, expectedRefundable: refundable }, ctx),
           applyMutation: (receipt) => {
             refundTxSig = receipt.txSig;
             hold.txSigs.push(receipt.txSig);
             hold.lastTxSig = receipt.txSig;
-            dispute.txSigs.push(receipt.txSig);
             hold.refunded += requested;
           },
         });
@@ -1994,8 +2130,6 @@ export class PaymentService {
       dispute.outcome = "refund";
       dispute.refundAmount = requested;
       dispute.resolvedAt = this.now();
-      this.store.putDispute(serializeDispute(dispute));
-
       this.record("resolve_dispute", auditActor, "ok", null, `dispute ${disputeId} resolved: refunded ${formatUsdc(requested)}`, {
         mandateId: hold.mandateId,
         holdId: hold.id,
@@ -2004,7 +2138,7 @@ export class PaymentService {
         txSig,
         held: hold.held,
         refundable: hold.captured - hold.refunded,
-      });
+      }, { dispute: serializeDispute(dispute) });
       return dispute;
     } catch (err) {
       const refusal = toRefusal(err);

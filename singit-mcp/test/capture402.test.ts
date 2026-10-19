@@ -46,6 +46,7 @@ import { runBackendContract } from "./backend-contract.js";
 import { PaymentService } from "../src/service.js";
 import { FileStateStore } from "../src/store.js";
 import { createHttpHandler } from "../src/http.js";
+import { createServiceRuntime } from "../src/runtime.js";
 const addr = (n: number) =>
   getAddressDecoder().decode(new Uint8Array(32).fill(n));
 const enc = (s: string) => Buffer.from(getAddressEncoder().encode(address(s)));
@@ -321,6 +322,52 @@ const rateLimit = (statusCode = 429) => new SolanaError(
   { statusCode, message: "SYNTHETIC_PRIVATE_PROVIDER_DETAIL", headers: new Headers({ "Retry-After": "0" }) },
 );
 
+test.each(["onPrepared", "retention", "pacing"] as const)(
+  "an identity failure observed during %s blocks the prepared original before send",
+  async boundary => {
+    let closed = false;
+    let original: PreparedTx | undefined;
+    const observeFailure = async () => {
+      f.genesis = "wrong-network";
+      await expect(f.backend.getStatus(original!.holdId!)).rejects.toMatchObject({ code: "invalid_network" });
+      expect(closed).toBe(true);
+      expect(f.sent).toHaveLength(0);
+    };
+    if (boundary === "retention") {
+      f.backend = new Capture402Backend(f.config, {
+        rpc: f.rpc,
+        loadSigner: async p => p === "payer" ? f.payer : f.merchant,
+        retainBeforeSend: observeFailure,
+      });
+    }
+    f.backend.onEnvironmentFailure(() => { closed = true; });
+    if (boundary === "pacing") {
+      // Pause only the dispatch pacing call; ordinary scheduled reads still run.
+      const scheduler = (f.backend as unknown as { scheduler: { pace(signal: AbortSignal): Promise<void> } }).scheduler;
+      const pace = scheduler.pace.bind(scheduler);
+      let paused = false;
+      vi.spyOn(scheduler, "pace").mockImplementation(async signal => {
+        await pace(signal);
+        if (original && !paused) {
+          paused = true;
+          await observeFailure();
+        }
+      });
+    }
+    await code(f.backend.hold(req(), { onPrepared: async prepared => {
+      original = structuredClone(prepared);
+      if (boundary === "onPrepared") await observeFailure();
+    } }), "invalid_network");
+    expect(f.sent).toHaveLength(0);
+    expect(original?.evidence?.signature).toBe(original?.txSig);
+    expect(f.backend.pendingOperation).toBeUndefined();
+    // A restored provider cannot reopen this backend or cause an automatic retry.
+    f.genesis = DEVNET_GENESIS_HASH;
+    await code(f.backend.hold(req()), "invalid_network");
+    expect(f.sent).toHaveLength(0);
+  },
+);
+
 test.each(["getFeeForMessage", "simulateTransaction", "getSignatureStatuses"])(
   "HTTP 429 on %s repeats only the same read and submits the original wire once",
   async method => {
@@ -452,6 +499,29 @@ test.each(["executable", "owner", "digest", "slot", "pointer"])(
     expect(f.sent).toHaveLength(0);
   },
 );
+test.each(["deployment", "network", "mint"])("a runtime identity mismatch found by a read closes admission until restart: %s", async mismatch => {
+  const dir = mkdtempSync(join(tmpdir(), "singit-environment-"));
+  const runtime = await createServiceRuntime({ SINGIT_BACKEND: "capture402", SINGIT_STATE_DIR: join(dir, "state"),
+    SINGIT_PROGRAM_ID: f.config.programId, SINGIT_PAYER_ADDRESS: f.payer.address,
+    SINGIT_MERCHANT_ADDRESS: f.merchant.address, SINGIT_NAMESPACE_LOCK_DIR: join(dir, "locks") }, { backend: f.backend, now: () => f.now });
+  try {
+    const mandate = await runtime.service.createMandate({ actor: "human", payer: f.payer.address, totalBudget: 1_000_000n,
+      perTxCap: 1_000_000n, expiresAt: f.now + 1000, allowedCounterparties: [f.merchant.address] });
+    if (mismatch === "deployment") f.accounts.get(f.config.programDataAddress)!.data[45] ^= 1;
+    if (mismatch === "network") f.genesis = "synthetic-other-network";
+    if (mismatch === "mint") f.accounts.get(DEVNET_USDC_MINT)!.data[44] = 9;
+    await expect(f.backend.getStatus(addr(99))).rejects.toMatchObject({ phase: "validation" });
+    expect(runtime.service.admissionStatus()).toMatchObject({ open: false, code: "ADMISSION_CLOSED" });
+    // Even restoring the observed bytes does not reopen this runtime or its backend latch.
+    if (mismatch === "deployment") f.accounts.get(f.config.programDataAddress)!.data[45] ^= 1;
+    if (mismatch === "network") f.genesis = DEVNET_GENESIS_HASH;
+    if (mismatch === "mint") f.accounts.get(DEVNET_USDC_MINT)!.data[44] = 6;
+    await expect(runtime.service.hold({ actor: f.payer.address, mandateId: mandate.id, payee: f.merchant.address,
+      amount: 1_000_000n, idempotencyKey: "refused-after-mismatch" })).rejects.toMatchObject({ code: "ADMISSION_CLOSED" });
+    await expect(f.backend.getStatus(addr(99))).rejects.toMatchObject({ phase: "validation" });
+    expect(f.sent).toHaveLength(0);
+  } finally { runtime.close(); rmSync(dir, { recursive: true, force: true }); }
+});
 test.each(["owner", "decimals", "initialized", "size"])(
   "invalid mint %s",
   async (k) => {

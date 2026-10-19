@@ -377,7 +377,37 @@ export class Capture402Backend implements PaymentBackend {
     });
   }
 
+  private environmentFailure?: BackendError;
+  private environmentObservers?: Set<() => void>;
+
+  /** Runtime latches admission closed on a verified identity mismatch, including one found by
+   * a read/reconciliation. No polling, signing or RPC is added by registering an observer. */
+  onEnvironmentFailure(observer: () => void): () => void {
+    (this.environmentObservers ??= new Set()).add(observer);
+    if (this.environmentFailure) observer();
+    return () => { this.environmentObservers?.delete(observer); };
+  }
+
+  private assertEnvironmentHealthy(): void {
+    if (this.environmentFailure) throw this.environmentFailure;
+  }
+
   private async environment(): Promise<void> {
+    this.assertEnvironmentHealthy();
+    try {
+      await this.verifyEnvironment();
+    } catch (error) {
+      if (error instanceof BackendError && ["invalid_network", "invalid_deployment", "wrong_mint"].includes(error.code)) {
+        this.environmentFailure = error;
+        for (const observer of this.environmentObservers ?? []) observer();
+      }
+      throw error;
+    }
+    // Another verifier may have latched a failure while this one was awaiting RPC.
+    this.assertEnvironmentHealthy();
+  }
+
+  private async verifyEnvironment(): Promise<void> {
     const genesis = await this.read("getGenesisHash", options =>
       this.rpc.getGenesisHash().send(options),
     );
@@ -1147,9 +1177,19 @@ export class Capture402Backend implements PaymentBackend {
         "Cannot persist original transaction; nothing sent",
       );
     }
+    const sendOptions = rpcOptions();
     try {
-      const options = rpcOptions();
-      await this.scheduler.pace(options.abortSignal);
+      await this.scheduler.pace(sendOptions.abortSignal);
+      // Evidence retention and pacing yield to reads that can close admission.
+      // Check synchronously at the dispatch boundary, before any send is possible.
+      this.assertEnvironmentHealthy();
+    } catch (error) {
+      // This original has definitely not been dispatched. Its durable prepared
+      // evidence remains in the service journal; no possible-send latch is cleared.
+      this.uncertain = undefined;
+      throw error;
+    }
+    try {
       const returned = await this.rpc
         .sendTransaction(wire, {
           encoding: "base64",
@@ -1157,7 +1197,7 @@ export class Capture402Backend implements PaymentBackend {
           preflightCommitment: COMMITMENT,
           maxRetries: 0n,
         })
-        .send(options);
+        .send(sendOptions);
       if (returned !== txSig) throw Error("Signature mismatch");
       const end = Date.now() + (this.config.confirmationTimeoutMs ?? 60_000);
       while (Date.now() < end) {

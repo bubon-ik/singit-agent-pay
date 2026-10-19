@@ -18,6 +18,7 @@
     "test:dashboard": "npm --prefix demo-dashboard run test:e2e",
     "typecheck": "npm --prefix singit-mcp run typecheck",
     "start:http": "npm --prefix singit-mcp run start:http",
-    "approve": "npm --prefix singit-mcp run approve --"
+    "approve": "npm --prefix singit-mcp run approve --",
+    "inspect:state": "npm --prefix singit-mcp run inspect:state --"
   }
 }

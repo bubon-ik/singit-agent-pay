@@ -35,6 +35,25 @@ let base: string;
 const now = () => clock;
 const sends = () => backend.holdCalls + backend.captureCalls + backend.releaseCalls + backend.refundCalls;
 
+test("agreed one-report scenario uses one hold and one atomic capture/remainder release over authenticated MCP", async () => {
+  const response = await fetch(`${base}/human/mandate`, { method: "POST",
+    headers: { "content-type": "application/json", "x-singit-human-secret": ROUTE_SECRET },
+    body: JSON.stringify({ payer: BUYER, totalBudget: "1000000", perTxCap: "1000000", expiresAt: clock + 900, allowedCounterparties: [MERCHANT] }) });
+  const mandateId = (await response.json()).mandate.id;
+  const held = await call(BUYER_TOKEN, "hold", { mandateId, payee: MERCHANT, amount: "1000000",
+    captureDeadline: clock + 600, refundDeadline: clock + 4200, idempotencyKey: "report:synthetic-intent:hold" });
+  expect(held.ok).toBe(true);
+  const args = { holdId: held.hold.id, amount: "650000", releaseRemainder: true, idempotencyKey: "report:synthetic-intent:capture" };
+  const captured = await call(MERCHANT_TOKEN, "capture", args);
+  expect(captured).toMatchObject({ ok: true, hold: { held: "0", captured: "650000", refunded: "0" } });
+  const state = await call(BUYER_TOKEN, "get_mandate", { mandateId });
+  expect(state).toMatchObject({ remaining: "350000", reserved: "0" });
+  expect(state.mandate.committed).toBe("650000");
+  expect(await call(MERCHANT_TOKEN, "capture", args)).toMatchObject({ ok: true, replay: true, operationId: captured.operationId, txSig: captured.txSig });
+  expect([backend.holdCalls, backend.captureCalls, backend.releaseCalls, backend.refundCalls]).toEqual([1, 1, 0, 0]);
+  expect(service.listOperations()).toHaveLength(2);
+});
+
 beforeEach(async () => {
   clock = 1_800_000_000;
   backend = new FaultyBackend(new MockBackend({ now, balances: { [BUYER]: 100_000_000n, [MERCHANT]: 20_000_000n, [OTHER_BUYER]: 100_000_000n } }));
@@ -180,6 +199,7 @@ test("a durable-write failure closes economic admission before anything is sent"
     putDispute: (d) => (broken ? fail() : inner.putDispute(d)),
     putOp: (op) => (broken ? fail() : inner.putOp(op)),
     putOpCommit: (c) => (broken ? fail() : inner.putOpCommit(c)),
+    putStateCommit: (c) => (broken ? fail() : inner.putStateCommit(c)),
     appendAudit: (e) => (broken ? fail() : inner.appendAudit(e)),
   };
   function fail(): never {
