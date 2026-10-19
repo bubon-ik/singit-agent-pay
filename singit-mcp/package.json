@@ -17,6 +17,7 @@
     "start": "tsx src/index.ts",
     "start:http": "tsx src/index.ts --http",
     "test": "vitest run",
+    "test:recovery:offline": "vitest run test/recovery.offline.test.ts test/review-regressions.test.ts test/accounting.atomic.test.ts test/journal-safety.test.ts test/store-io.test.ts test/inspection.test.ts test/runtime.test.ts test/service.hardening.test.ts test/safety.mcp.test.ts test/capture402.test.ts test/backend-contract.mock.test.ts",
     "e2e:mcp": "vitest run test/e2e.mcp",
     "demo": "tsx scripts/demo.ts",
     "approve": "tsx scripts/approve.ts",

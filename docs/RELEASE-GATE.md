@@ -1,6 +1,6 @@
 # MVP release gate and Go/No-Go (MVP-08, #15)
 
-Status as of 19 October 2026. This file records offline evidence only. A skipped or unrun test is not a PASS, and offline tests are not live economic acceptance.
+Status as of 20 October 2026. This file records offline evidence only. A skipped or unrun test is not a PASS, and offline tests are not live economic acceptance.
 
 The tables below retain their original pinned historical SHA and results. The
 scenario and current acceptance sequence are [MVP-SCENARIO.md](MVP-SCENARIO.md);
@@ -9,7 +9,37 @@ Journal v2 replaces the historical tail-repair policy with byte-preserving refus
 see [JOURNAL.md](JOURNAL.md). This edit does not grant offline readiness, authorize
 a run, accept the newer source, or close the remaining refund/reclaim/LLM gates.
 
-## Pinned candidate
+## Current preparation and ordered decisions
+
+Journal/runtime PR #23 is a candidate at
+`643dac3070b97677e24ce7c457ced924f82839e2`, based on
+`97449d25032bbe6dc86d5f8b183b2ce3ec6262d4`. The local recovery/refund/reclaim
+preparation is specified in [RECOVERY-OFFLINE.md](RECOVERY-OFFLINE.md). Its
+scenarios retain PR #23's v1/v2 byte preservation, atomic receipt/accounting/audit
+and custody-drain boundaries. Automatic live cleanup and multi-step disputes
+remain disabled. The merchant still defaults to mock.
+
+| Decision | Evidence required | Current disposition |
+| --- | --- | --- |
+| `OFFLINE_READY` | Exact final combined source review, lockfiles/toolchain, backend/transport/dashboard/merchant/fault checks, accepted refund/reclaim scope, useful real-LLM mock trace and reviewed devnet profile | Not granted by scenario preparation. Final combined revision and remaining integration/LLM evidence are pending |
+| `ONE_RUN_AUTHORIZED` | `OFFLINE_READY`, private existing-deployment/RPC/wallet/journal binding, named operator/reviewer/stop-go owner, deadlines and USDC/SOL/attempt caps, separate owner authorization explicitly covering read-only preflight and one run | NOT AUTHORIZED. This decision permits only the named experiment; it does not claim the experiment succeeded |
+| `MVP_ACCEPTED` | The authorized real-LLM → merchant → MCP → devnet E2E, both original finalized outcomes with err=null, token/accounting effects, durable artifact digest, no pending/UNKNOWN, explicit operator and reviewer acceptance | NOT ACCEPTED; follows E2E |
+
+The E2E result is required for final acceptance, not for permission to attempt the
+single test that produces it. Merge authorization, operational authorization and
+MVP acceptance are separate records. No merge, live preflight, deployment, funding
+or hosted Actions is authorized by preparing this gate. Unfilled roles or a missing
+required gate preserve refusal of live writes.
+
+## Historical evidence only
+
+The following tables describe their original revisions, including gaps that PR
+#23 now addresses in source. They must not be read as current acceptance or as a
+request to restore older tail repair. The separately reported **263/14/22 PASS**
+and PR #23 test counts are also historical baselines; final SHAs require their own
+results, skips and exact-head review. Keep operational acceptance packets private.
+
+### Historical pinned candidate
 
 | Item | Value |
 |---|---|
@@ -22,7 +52,7 @@ a run, accept the newer source, or close the remaining refund/reclaim/LLM gates.
 
 Re-run this gate on whatever revision is finally frozen. These results apply only to the SHA above.
 
-## Offline gate results
+### Historical offline gate results
 
 | Check | Command | Result |
 |---|---|---|
@@ -34,7 +64,7 @@ Re-run this gate on whatever revision is finally frozen. These results apply onl
 | Dashboard suites | `npm --prefix demo-dashboard test` | PASS: 14 passed |
 | CI | none configured for this repository | NOT AVAILABLE; this gate was run locally |
 
-## Fault matrix
+### Historical fault matrix
 
 Coverage is PASS only where a named test exercises the case on the pinned SHA. The test files are in `singit-mcp/test/`.
 
@@ -58,7 +88,7 @@ Coverage is PASS only where a named test exercises the case on the pinned SHA. T
 | H=0 misread as repayment | `service.hardening`: fix3b | PASS |
 | Live dispute and cleanup gating | `safety.mcp`: two-step dispute refund refused; `runtime`: no automatic cleanup in live mode | PASS |
 
-## Dependency status
+### Historical dependency status
 
 | Issue | State on this SHA |
 |---|---|
@@ -70,19 +100,19 @@ Coverage is PASS only where a named test exercises the case on the pinned SHA. T
 | MVP-06 deployment and environment | Verified by the Capture402 side (starPaw/capture402-solana#6); evidence private |
 | #14 MVP-07 real-agent devnet E2E | NOT RUN. The merchant example must be adapted to PR #17 and #19 (tokens, `/human/mandate`, `idempotencyKey`) |
 
-## Go/No-Go
+### Historical demo disposition
 
 | Decision | Verdict | Reason |
 |---|---|---|
-| Live devnet economic MVP | **NO-GO** | P0 #14 has no accepted real-agent devnet E2E; #11 and #13 still have open P0 items; there is no named stop/go owner or operational budget on record |
+| Live devnet economic MVP | **NOT ACCEPTED** | P0 #14 has no accepted real-agent devnet E2E; permission for one test is a separate decision in the current table above |
 | Contest demo on the mock backend | **GO**, labeled "MOCK" | All offline gates above pass on the pinned SHA |
 | Historical devnet results | May be shown, labeled "historical" | They ran on older revisions (see #14), not on this SHA |
 
-What would change live to GO:
-1. The merchant example is adapted and reviewed, and the offline gate is re-run on the combined final SHA.
-2. The owner records the scenario, caps (USDC, SOL, attempts), stop/go owners and buyer recovery in [RUNBOOK.md](RUNBOOK.md), and gives separate operational authorization.
-3. One bounded real-agent devnet E2E (#14) completes with original finalized outcomes and no UNKNOWN. UNKNOWN stops the run; it is never repeated.
-4. Operator and reviewer sign below.
+For the next candidate, first freeze/review the combined exact revisions and
+complete `OFFLINE_READY`. Then record the private run fields in
+[RUNBOOK.md](RUNBOOK.md) and obtain `ONE_RUN_AUTHORIZED`. Only after the bounded
+E2E (#14) may operator and reviewer record `MVP_ACCEPTED`. UNKNOWN stops the run;
+it never authorizes a repeat. Empty signature rows below grant no gate.
 
 Limits in every case: experimental devnet only. This is not production software and has not been audited.
 
