@@ -459,7 +459,7 @@ test("fix3a) cleanup_release not_found triggers a fresh guarded retry instead of
   assertInvariant(service, mock, mandate.id);
 });
 
-test("fix3b) cleanup_release not_found but on-chain state already shows held=0 -> frees the reservation without a redundant release call", async () => {
+test("fix3b) MVP-05: cleanup_release not_found + on-chain held=0 is NOT taken as repayment: reservation kept, no release call", async () => {
   const { service, backend, mock, now } = setup();
   const mandate = await createMandate(service, now, 1_000_000n);
 
@@ -470,19 +470,19 @@ test("fix3b) cleanup_release not_found but on-chain state already shows held=0 -
   const cleanupOps = service.listOperations({ state: "unknown" }).filter((o) => o.action === "cleanup_release");
   const holdId = cleanupOps[0].holdId!;
 
-  // Simulate an external/concurrent release that already landed on-chain for this hold (e.g. a
-  // second process's cleanup attempt), bypassing this service entirely.
+  // H=0 on-chain, but nothing proves THIS cleanup moved the funds: a merchant capture outside the
+  // service empties the hold just the same, and the funds then went to the payee, not the payer.
   const payment = mock.listPayments().find((p) => p.holdId === holdId)!;
-  await mock.release({ holdId, expectedHeld: payment.held, expectedRefundable: payment.refundable });
+  await mock.capture({ holdId, amount: payment.held, releaseRemainder: false, expectedHeld: payment.held, expectedRefundable: payment.refundable });
   expect(mock.listPayments().find((p) => p.holdId === holdId)?.held).toBe(0n);
 
   const releaseSpy = vi.spyOn(backend, "release");
   await service.reconcile(cleanupOps[0].id);
-  expect(service.getOperation(cleanupOps[0].id).state).toBe("succeeded");
-  expect(releaseSpy).toHaveBeenCalledTimes(0); // no redundant release call: getStatus already showed held=0
-  expect(service.getHold(holdId).held).toBe(0n);
-  expect(service.getMandate(mandate.id).remaining).toBe(1_000_000n); // freed exactly once
-  assertInvariant(service, mock, mandate.id);
+  expect(service.getOperation(cleanupOps[0].id).state).toBe("unknown");
+  expect(releaseSpy).toHaveBeenCalledTimes(0); // no fresh wire either
+  expect(service.getHold(holdId).quarantined).toBe(true);
+  expect(service.getMandate(mandate.id).remaining).toBe(700_000n); // budget NOT freed as though released
+  expect(service.listAuditLog().at(-1)?.reason).toMatch(/release vs capture cannot be told apart/);
 });
 
 test("fix3c) a quarantined hold refuses capture/refund/release(by payee)/open_dispute with WRONG_MINT", async () => {

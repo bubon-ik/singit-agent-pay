@@ -74,7 +74,7 @@ function renderDispute(disputes) {
   const refundValue = preserveRefund ? currentRefund.value : null;
   const d = disputes.find((x) => x.status === "open") ?? disputes[disputes.length - 1];
   if (!d) {
-    el.innerHTML = `<div class="card-h"><h2>Disputes</h2><span class="hint">human in the loop</span></div><div class="empty">No disputes. Payers can freeze a hold and escalate to a human.</div>`;
+    el.innerHTML = `<div class="card-h"><h2>Disputes</h2><span class="hint">human in the loop</span></div><div class="empty">No disputes. Payers can dispute a hold and escalate to a human.</div>`;
     return;
   }
   const open = d.status === "open";
@@ -83,7 +83,7 @@ function renderDispute(disputes) {
   const decided = !open, refunded = decided && d.outcome === "refund";
   const st = (cls, n, title, sub) => `<div class="fstep ${cls}"><div class="fn">${n}</div><div><div class="ft">${title}</div><div class="fs">${sub}</div></div></div>`;
   const flow = `<div class="flow">
-    ${st("done", 1, "Agent opens dispute", `${esc(short(d.openedBy))} freezes ${esc(d.holdId)}`)}
+    ${st("done", 1, "Agent opens dispute", `${esc(short(d.openedBy))} disputes ${esc(d.holdId)}`)}
     ${st(decided ? (d.outcome === "reject" ? "bad" : "done") : "wait", 2, "Human approves / rejects", decided ? (d.outcome === "reject" ? "rejected" : "approved") : "waiting for a click")}
     ${st(refunded ? "done" : d.outcome === "reject" ? "skip" : "", 3, "MCP signs refund (server key)", refunded ? "signed for human-approved:kostiantyn" : d.outcome === "reject" ? "not needed" : "pending")}
     ${st(refunded ? "done" : d.outcome === "reject" ? "skip" : "", 4, "Refund tx", refunded ? `${fmt(d.refundAmount)} USDC · ${refundTx ? txLink(refundTx) : "—"}` : d.outcome === "reject" ? "none" : "pending")}
@@ -95,7 +95,7 @@ function renderDispute(disputes) {
     ${open ? `<div class="btnrow"><input id="refAmt" class="refin" value="${fmt(d.suggestedRefund ?? 0)}" /> <span class="hint">USDC</span>
       <button class="btn approve" id="approve">Approve refund</button><button class="btn reject" id="reject">Reject</button></div>
       <div id="resolveError" class="err" aria-live="polite"></div>
-      <div class="human">Captures on this hold are frozen. Approve/Reject uses the human resolution path; agents can never call it themselves.</div>` : ""}`;
+      <div class="human">SingIt refuses captures on this hold (not an on-chain freeze). Approve/Reject uses the human resolution path; agents can never call it themselves.</div>` : ""}`;
   if (open) {
     const input = $("refAmt");
     if (preserveRefund) {

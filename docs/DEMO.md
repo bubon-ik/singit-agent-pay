@@ -20,7 +20,7 @@ Amounts are USDC (6 decimals on-chain: `2500000` = 2.5 USDC).
 | 8 | research-bot | `hold` 1 USDC for `agent:unknown-seller` | **BLOCKED `COUNTERPARTY_NOT_ALLOWED`** |
 | 9 | research-bot | `hold` 4 USDC more for data-vendor | **BLOCKED `OVER_BUDGET`** (remaining 3.5) |
 | 10 | data-vendor | `refund` 0.5 USDC (goodwill) | refunded; refunds never re-open the budget |
-| 11 | research-bot | `open_dispute` on the 4 USDC gpu-broker hold ("GPU job returned empty results") | dispute open, captures on that hold frozen |
+| 11 | research-bot | `open_dispute` on the 4 USDC gpu-broker hold ("GPU job returned empty results") | dispute open, SingIt refuses captures on that hold (not an on-chain freeze) |
 | 12 | research-bot | `resolve_dispute` on its own dispute (no token / forged token) | **BLOCKED `HUMAN_APPROVAL_REQUIRED`**: an agent cannot approve itself |
 | 13 | human | approves a **4 USDC refund** (dashboard console or `npm run approve -- <disputeId> refund 4000000`) | dispute resolved, 4 USDC back to research-bot |
 

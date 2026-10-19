@@ -59,7 +59,7 @@ test("demo story: budget enforcement, escrow lifecycle, human-approved dispute",
   assert.ok(agentResolutions.every((a) => a.outcome === "blocked" && a.code === "HUMAN_APPROVAL_REQUIRED"));
   assert.ok([...captions].some((caption) => caption.includes("escrow (mock)")));
   assert.ok([...captions].every((caption) => !caption.includes("on-chain escrow")));
-  assert.ok([...captions].some((caption) => caption.includes("frozen pending a human decision")), "dispute step caption must be observed while polling");
+  assert.ok([...captions].some((caption) => caption.includes("pending a human decision")), "dispute step caption must be observed while polling");
   assert.equal(s.disputes[0].status, "open");
   assert.equal(s.disputes[0].suggestedRefund, "4000000", "suggestedRefund equals the disputed hold's captured - refunded");
   // agents cannot resolve disputes themselves

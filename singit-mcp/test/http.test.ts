@@ -196,8 +196,18 @@ test("/human/resolve: valid header resolves the dispute and audits as human-appr
       headers: { "Content-Type": "application/json", "x-singit-human-secret": ROUTE_SECRET },
       body: JSON.stringify({ disputeId, outcome: "reject" }),
     });
-    expect(replay.status).toBe(409);
-    expect((await replay.json()).code).toBe("DISPUTE_ALREADY_RESOLVED");
+    // MVP-02: the same human decision is one intent, so a retry replays the original resolution...
+    expect(replay.status).toBe(200);
+    expect((await replay.json()).dispute.outcome).toBe("reject");
+    expect(service.listAuditLog().at(-1)!.reason).toMatch(/idempotent replay/);
+    // ...while a different decision on the resolved dispute is still refused.
+    const changed = await fetch(`${base}/human/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-singit-human-secret": ROUTE_SECRET },
+      body: JSON.stringify({ disputeId, outcome: "refund", refundAmount: "0" }),
+    });
+    expect(changed.status).toBe(409);
+    expect((await changed.json()).code).toBe("DISPUTE_ALREADY_RESOLVED");
   } finally {
     await closeServer(server);
   }

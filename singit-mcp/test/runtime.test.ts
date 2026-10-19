@@ -93,7 +93,7 @@ test("restored finalized holds converge before startup returns, with no second s
   const dir = directory(), paymentBackend = backend();
   const first = await start(dir, paymentBackend), m = await mandate(first);
   paymentBackend.queueHoldFault("ambiguous-after");
-  await expect(first.service.hold({ actor: payer, mandateId: m.id, payee, amount: 400_000n })).rejects.toMatchObject({ code: "OPERATION_UNKNOWN" });
+  await expect(first.service.hold({ actor: payer, mandateId: m.id, payee, amount: 400_000n, idempotencyKey: "intent-1" })).rejects.toMatchObject({ code: "OPERATION_UNKNOWN" });
   first.close();
   const second = await start(dir, paymentBackend);
   expect(paymentBackend.holdCalls).toBe(1);
@@ -106,7 +106,7 @@ test("unresolved original outcomes stop startup and preserve reservations withou
   const dir = directory(), paymentBackend = backend();
   const first = await start(dir, paymentBackend), m = await mandate(first);
   paymentBackend.queueHoldFault("ambiguous-after");
-  await expect(first.service.hold({ actor: payer, mandateId: m.id, payee, amount: 400_000n })).rejects.toMatchObject({ code: "OPERATION_UNKNOWN" });
+  await expect(first.service.hold({ actor: payer, mandateId: m.id, payee, amount: 400_000n, idempotencyKey: "intent-1" })).rejects.toMatchObject({ code: "OPERATION_UNKNOWN" });
   first.close();
   vi.spyOn(paymentBackend, "getTxOutcome").mockResolvedValue({ status: "pending" });
   await expect(start(dir, paymentBackend)).rejects.toMatchObject({ code: "STARTUP_RECONCILIATION_REQUIRED" });
@@ -121,7 +121,7 @@ test("startup recovery never sends cleanup when a restored hold has mismatched t
   const dir = directory(), paymentBackend = backend();
   const first = await start(dir, paymentBackend), m = await mandate(first);
   paymentBackend.queueStatusFault("throw");
-  await expect(first.service.hold({ actor: payer, mandateId: m.id, payee, amount: 400_000n })).rejects.toMatchObject({ code: "OPERATION_UNKNOWN" });
+  await expect(first.service.hold({ actor: payer, mandateId: m.id, payee, amount: 400_000n, idempotencyKey: "intent-1" })).rejects.toMatchObject({ code: "OPERATION_UNKNOWN" });
   first.close();
   paymentBackend.queueStatusFault("wrong-mint");
   await expect(start(dir, paymentBackend)).rejects.toMatchObject({ code: "STARTUP_RECONCILIATION_REQUIRED" });
@@ -129,15 +129,36 @@ test("startup recovery never sends cleanup when a restored hold has mismatched t
   expect(new FileStateStore(dir).load().ops).toHaveLength(1);
 });
 
-test("startup recovery never retries a previously failed cleanup transaction", async () => {
+test("live mode never sends an automatic cleanup: a wrong-terms hold is quarantined and stays committed across restart", async () => {
   const dir = directory(), paymentBackend = backend();
   const first = await start(dir, paymentBackend), m = await mandate(first);
   paymentBackend.queueStatusFault("wrong-mint");
-  paymentBackend.queueReleaseFault("ambiguous-before");
-  await expect(first.service.hold({ actor: payer, mandateId: m.id, payee, amount: 400_000n })).rejects.toMatchObject({ code: "WRONG_MINT" });
+  await expect(first.service.hold({ actor: payer, mandateId: m.id, payee, amount: 400_000n, idempotencyKey: "intent-1" })).rejects.toMatchObject({ code: "WRONG_MINT" });
+  expect(paymentBackend.releaseCalls).toBe(0);
+  expect(first.service.listOperations().map((o) => [o.action, o.state])).toEqual([["hold", "succeeded"]]);
   first.close();
-  await expect(start(dir, paymentBackend)).rejects.toMatchObject({ code: "STARTUP_RECONCILIATION_REQUIRED" });
-  expect(paymentBackend.releaseCalls).toBe(1);
+  const second = await start(dir, paymentBackend);
+  expect(paymentBackend.releaseCalls).toBe(0);
+  const [hold] = second.service.getMandate(m.id).holds;
+  expect(hold.quarantined).toBe(true);
+  expect(second.service.getMandate(m.id).remaining).toBe(1_600_000n);
+});
+
+test("MVP-04: a second runtime on the same wallets refuses even with a different state directory", async () => {
+  const env = { SINGIT_BACKEND: "capture402", SINGIT_PROGRAM_ID: "prog", SINGIT_PAYER_ADDRESS: payer, SINGIT_MERCHANT_ADDRESS: payee, SINGIT_NAMESPACE_LOCK_DIR: directory() };
+  const paymentBackend = backend();
+  const first = await createServiceRuntime({ ...env, SINGIT_STATE_DIR: directory() }, { backend: paymentBackend, now });
+  runtimes.push(first);
+  const otherDir = directory();
+  await expect(createServiceRuntime({ ...env, SINGIT_STATE_DIR: otherDir }, { backend: paymentBackend, now })).rejects.toMatchObject({ code: "NAMESPACE_LOCKED" });
+  expect(existsSync(join(otherDir, ".singit-mcp.lock"))).toBe(false); // the refused runtime released its own dir lock
+  await mandate(first); // the first runtime keeps working
+  first.close();
+  // Shutdown closes admission on the old service; a new runtime may now take the namespace.
+  await expect(mandate(first)).rejects.toMatchObject({ code: "ADMISSION_CLOSED" });
+  const second = await createServiceRuntime({ ...env, SINGIT_STATE_DIR: otherDir }, { backend: paymentBackend, now });
+  runtimes.push(second);
+  expect(second.service.admissionStatus().open).toBe(true);
 });
 
 test("mock startup keeps its ephemeral ledger and rejects misleading durable configuration", async () => {

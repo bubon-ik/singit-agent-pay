@@ -76,7 +76,7 @@ test("capture: crash between backend success and local commit -> restart + recon
   const mock = new MockBackend({ now, balances: { [PAYER]: 1_000_000_000n, [PAYEE]: 1_000_000_000n } });
   const captureSpy = vi.spyOn(mock, "capture");
 
-  const service1 = new PaymentService({ backend: mock, now, approvalSecret: SECRET, store: new CrashingStore(new FileStateStore(dir), "putOpCommit", 1) });
+  const service1 = new PaymentService({ backend: mock, now, approvalSecret: SECRET, store: new CrashingStore(new FileStateStore(dir), "putOpCommit", 3) }); // 1-2: the hold's reservation + its success
   const mandate = await service1.createMandate(mandateArgs(now));
   const hold = await service1.hold({ actor: PAYER, mandateId: mandate.id, payee: PAYEE, amount: 400_000n });
 
@@ -142,7 +142,7 @@ test("release: crash between backend success and local commit -> restart + recon
   const mock = new MockBackend({ now, balances: { [PAYER]: 1_000_000_000n, [PAYEE]: 1_000_000_000n } });
   const releaseSpy = vi.spyOn(mock, "release");
 
-  const service1 = new PaymentService({ backend: mock, now, approvalSecret: SECRET, store: new CrashingStore(new FileStateStore(dir), "putOpCommit", 1) });
+  const service1 = new PaymentService({ backend: mock, now, approvalSecret: SECRET, store: new CrashingStore(new FileStateStore(dir), "putOpCommit", 3) }); // 1-2: the hold's reservation + its success
   const mandate = await service1.createMandate(mandateArgs(now));
   const hold = await service1.hold({ actor: PAYER, mandateId: mandate.id, payee: PAYEE, amount: 400_000n });
 

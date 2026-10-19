@@ -3,7 +3,7 @@
  * human dispute-resolution console. All three share one PaymentService. "mcp" and "state" are
  * separate rate-limit buckets so dashboard polling never starves MCP tool calls.
  */
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { AmountError, parseUsdc } from "./amount.js";
@@ -142,6 +142,21 @@ export function createHttpHandler(opts: HttpHandlerOptions): (req: IncomingMessa
     );
   }
 
+  /**
+   * MVP-04: economic readiness, separate from /health liveness. Counts and reason codes only (no
+   * wires, salts or evidence). Live backends require the human route secret to read it.
+   */
+  async function handleReady(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!allowState(clientKeyOf(req))) {
+      sendRateLimited(res);
+      return;
+    }
+    if (backendName !== "mock" && !checkHumanRouteSecret(req, res, routeSecret)) return;
+    const admission = service.admissionStatus();
+    const ready = admission.open && admission.unresolvedOps === 0;
+    sendJson(res, ready ? 200 : 503, { ok: true, ready, backend: backendName, admission });
+  }
+
   async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!allowMcp(clientKeyOf(req))) {
       sendRateLimited(res);
@@ -206,7 +221,7 @@ export function createHttpHandler(opts: HttpHandlerOptions): (req: IncomingMessa
       return;
     }
     const body = parsed as Record<string, unknown>;
-    const { disputeId, outcome, refundAmount: refundAmountRaw, actor, approvalToken: suppliedToken } = body;
+    const { disputeId, outcome, refundAmount: refundAmountRaw, actor, approvalToken: suppliedToken, idempotencyKey: suppliedKey } = body;
     if (typeof disputeId !== "string" || !disputeId || (outcome !== "refund" && outcome !== "reject")) {
       sendJson(res, 400, { ok: false, code: "INVALID_INPUT", reason: 'disputeId (string) and outcome ("refund"|"reject") are required' });
       return;
@@ -234,6 +249,13 @@ export function createHttpHandler(opts: HttpHandlerOptions): (req: IncomingMessa
     }
     // else: no approvalSecret configured; let the service refuse with HUMAN_APPROVAL_REQUIRED.
 
+    // One human decision = one intent (MVP-02): a retried click or lost response replays the
+    // original resolution instead of acting twice. Clients may pass their own key instead.
+    const idempotencyKey =
+      typeof suppliedKey === "string" && suppliedKey
+        ? suppliedKey
+        : `human-${createHash("sha256").update(`${disputeId}|${outcome}|${refundAmount ?? 0n}`).digest("hex").slice(0, 40)}`;
+
     try {
       const dispute = await service.resolveDispute({
         actor: typeof actor === "string" && actor ? actor : "human",
@@ -241,6 +263,7 @@ export function createHttpHandler(opts: HttpHandlerOptions): (req: IncomingMessa
         outcome,
         refundAmount,
         approvalToken,
+        idempotencyKey,
       });
       sendJson(res, 200, { ok: true, dispute, txSig: dispute.txSigs.at(-1) ?? null });
     } catch (err) {
@@ -346,7 +369,12 @@ export function createHttpHandler(opts: HttpHandlerOptions): (req: IncomingMessa
         const url = req.url ?? "/";
 
         if (method === "GET" && url === "/health") {
+          // Liveness only: the process answers. It says nothing about permission to send (see /ready).
           sendJson(res, 200, { ok: true });
+          return;
+        }
+        if (method === "GET" && url === "/ready") {
+          await handleReady(req, res);
           return;
         }
         if (method === "GET" && url === "/api/state") {

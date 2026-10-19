@@ -164,7 +164,7 @@ test("/human/reset: mock backend without resetService -> 409 RESET_MOCK_ONLY", a
   }
 });
 
-test("MCP tools/list still exactly the 11 tool names (no reset tool)", async () => {
+test("MCP tools/list still exactly the 12 tool names (no reset tool)", async () => {
   const { server, base } = await startServer();
   try {
     const res = await toolsListRequest(base);
@@ -183,6 +183,7 @@ test("MCP tools/list still exactly the 11 tool names (no reset tool)", async () 
       "open_dispute",
       "list_disputes",
       "resolve_dispute",
+      "get_operation",
       "list_audit_log",
     ]);
     expect(names).not.toContain("reset");

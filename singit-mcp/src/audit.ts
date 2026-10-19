@@ -33,6 +33,10 @@ export const RefusalCodes = [
   "OPERATION_PENDING", // another op on this hold is still pending/unknown; refused before any backend call
   "IDEMPOTENCY_KEY_REUSED", // same scoped idempotency key, different request params
   "PRINCIPAL_FORBIDDEN", // MVP-01: the trusted transport principal may not perform this action / see this object
+  "IDEMPOTENCY_KEY_REQUIRED", // MVP-02: live economic writes must carry a stable client idempotencyKey
+  "ADMISSION_CLOSED", // MVP-04: UNKNOWN, storage failure or shutdown closed economic write admission
+  "STORAGE_FAILURE", // MVP-04: a durable journal write failed; nothing new is sent until restart
+  "ACTION_DISABLED", // MVP-05: flow not accepted for live mode (multi-step dispute, automatic cleanup)
 ] as const;
 export type RefusalCode = (typeof RefusalCodes)[number];
 

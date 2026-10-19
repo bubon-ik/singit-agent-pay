@@ -87,7 +87,9 @@ export interface OperationRecord {
   /** On-chain held/refundable this op should produce once it lands (capture/release/refund/cleanup_release). */
   expected?: { held: string; refundable: string };
   state: OpState;
-  result?: { holdId?: string; txSig?: string };
+  /** `hold` is the hold exactly as this op's success left it (MVP-02): an idempotent replay
+   * returns this original outcome, not the hold's later, mutable state. */
+  result?: { holdId?: string; txSig?: string; hold?: StoredHold };
   /** `refusalCode` is the Refusal the ORIGINAL caller received (or would receive on replay);
    * `code`/`message` are the raw backend-level detail. Falls back to BACKEND_ERROR if unset
    * (older records predating this field). */
