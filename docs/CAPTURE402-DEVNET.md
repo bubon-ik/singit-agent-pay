@@ -28,9 +28,46 @@ through refunds. Payment history needs original finalized transaction evidence.
 ## Configuration and independent deployment acceptance
 
 Copy `singit-mcp/.env.example` to a private ignored environment file and fill it
-locally; never paste key material into chat. The program ID is mandatory and
-**not yet confirmed for this integration**. A deployer public key is not a
-program ID. Local `[42;32]` and other source fixture IDs prove no deployment.
+locally; never paste key material into chat. The program ID is mandatory; the
+partner-confirmed hackathon deployment is recorded below. A deployer public key
+is not a program ID. Local `[42;32]` and other source fixture IDs prove no deployment.
+
+### Confirmed devnet deployment (hackathon fixture)
+
+Public deployment identity supplied by the Capture402 author (starPaw) for this
+hackathon. These are public on-chain values, not secrets:
+
+```sh
+SINGIT_PROGRAM_ID=992QmwmwCebawRJsTCgvc8qnzGivbFaD39ZQE7VhHp7o
+SINGIT_PROGRAM_DATA=HTKbRudHxuqgQvqpfrUM59ZohVfbx81Yu8Bdyp897doM
+SINGIT_DEPLOYMENT_SLOT=508146249
+SINGIT_EXECUTABLE_SHA256=adee4e8f51fbc52b046c4d5a846c63ecdb63d392b1d16b559d3f6c2984b27415
+```
+
+Provenance: `992Qmwmw…` also appears as a test fixture in capture402-solana
+`ops/test_reconcile_wire.py:17`; that repo reference proves nothing. It is the
+deployment ID here only because the partner confirmed it as their devnet deployment.
+
+Read-only check on 2026-10-19 (one public devnet RPC, genesis
+`EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG`, finalized):
+
+- Program account exists, `executable: true`, owner
+  `BPFLoaderUpgradeab1e11111111111111111111111`, points to the ProgramData above.
+- ProgramData is owned by the upgradeable loader, has deployment slot `508146249`, and
+  SHA256 of bytes after offset 45 (including padding) equals the value above.
+- On-chain upgrade authority: `FoPVWtFGoGmnJCarUaqA7bbyhNpR7QsRDE171oDp1Bqm`
+  (the program is upgradeable; the partner still has to confirm who holds this key).
+
+This shows that the values agree with chain state. It is **not** independent acceptance:
+nobody has compared a source build of the pinned commit with this payload yet.
+
+**Still needed before any live smoke** (public values only, never keys):
+
+- `SINGIT_PAYER_ADDRESS`, `SINGIT_MERCHANT_ADDRESS` (public keys of separate
+  throwaway devnet wallets; keypair files stay local, outside Git, mode 600)
+- confirmation of the upgrade authority above and its upgrade policy during the hackathon
+- RPC choice: approved Helius/QuickNode HTTPS endpoint (the backend refuses public RPC)
+- funding status: payer/merchant SOL and Circle devnet USDC ATAs (see planning table below)
 
 Before configuration, the owner must independently approve the devnet deployment
 and the executable built from the pinned source. Supply its program ID,
