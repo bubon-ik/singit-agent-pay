@@ -6,6 +6,7 @@ import { randomBytes } from "node:crypto";
 import { extname, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as local from "./adapter/local-service.mjs";
+import { deriveTimeline } from "./lib/derive.mjs";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 5173);
@@ -108,7 +109,8 @@ function normalizeRemoteState(s = {}) {
     const byId = new Map(mandates.map((m) => [m.id, m]));
     for (const h of s.holds) { const m = byId.get(h.mandateId); if (m && !m.holds.some((x) => x.id === h.id)) m.holds.push(normalizeRemoteHold(h)); }
   }
-  return { backend: s.backend, mandates, holds: Array.isArray(s.holds) ? s.holds.map(normalizeRemoteHold) : [], disputes: Array.isArray(s.disputes) ? s.disputes.map((d) => ({ ...d, refundAmount: d.refundAmount == null ? d.refundAmount : String(d.refundAmount), txRefs: d.txSigs ?? d.txRefs ?? [] })) : [], audit: Array.isArray(s.audit) ? s.audit : [] };
+  const ops = Array.isArray(s.ops) ? s.ops.map((op) => ({ ...op, reservation: op.reservation == null ? op.reservation : String(op.reservation), params: op.params && typeof op.params === "object" ? Object.fromEntries(Object.entries(op.params).map(([key, value]) => [key, value == null ? value : (typeof value === "bigint" || typeof value === "number") ? String(value) : value])) : op.params, expected: op.expected && typeof op.expected === "object" ? Object.fromEntries(Object.entries(op.expected).map(([key, value]) => [key, value == null ? value : (typeof value === "bigint" || typeof value === "number") ? String(value) : value])) : op.expected })) : undefined;
+  return { backend: s.backend, mandates, holds: Array.isArray(s.holds) ? s.holds.map(normalizeRemoteHold) : [], disputes: Array.isArray(s.disputes) ? s.disputes.map((d) => ({ ...d, refundAmount: d.refundAmount == null ? d.refundAmount : String(d.refundAmount), txRefs: d.txSigs ?? d.txRefs ?? [] })) : [], audit: Array.isArray(s.audit) ? s.audit : [], ...(ops ? { ops } : {}) };
 }
 async function refreshRemoteState(base) {
   try { const r = await fetch(`${base}/api/state`); if (r.ok) remoteCache = normalizeRemoteState(await r.json()); } catch { /* retain last successful remote snapshot */ }
@@ -171,39 +173,6 @@ const pickHoldId = (r) => r?.hold?.id ?? r?.hold?.holdId ?? r?.holdId ?? r?.id;
 const normalizeHold = (h) => ({ ...h, status: h.status ?? (BigInt(h.held ?? 0) > 0n ? "held" : "settled"), held: h.held == null ? h.held : String(h.held), captured: h.captured == null ? h.captured : String(h.captured), refunded: h.refunded == null ? h.refunded : String(h.refunded), maximum: h.maximum == null ? h.maximum : String(h.maximum), txRef: h.lastTxSig ?? h.txRef });
 const normalizeMandate = (r) => { const m = r?.mandate ? { ...r.mandate, remaining: r.remaining, holds: r.holds } : r; return m && { ...m, totalBudget: String(m.totalBudget), perTxCap: String(m.perTxCap), remaining: m.remaining == null ? m.remaining : String(m.remaining), committed: m.committed == null ? m.committed : String(m.committed), holds: (m.holds ?? []).map(normalizeHold) }; };
 function getAudit() { return impl.kind === "mcp-http" ? remoteCache.audit : svc.listAuditLog({}); }
-function deriveTimeline(audit, mandates) {
-  const holdById = new Map(mandates.flatMap((m) => (m.holds ?? []).map((h) => [h.id, h])));
-  const kinds = { create_mandate: "mandate", hold: "hold", capture: "capture", release: "release", refund: "refund", open_dispute: "dispute", resolve_dispute: "resolve", reset: "reset" };
-  return audit.map((a, index) => {
-    const failed = a.outcome !== "ok", code = a.code ?? null;
-    const blockedLabels = { OVER_PER_TX_CAP: "over per-tx cap", COUNTERPARTY_NOT_ALLOWED: "counterparty not allowed", OVER_BUDGET: "over budget", HUMAN_APPROVAL_REQUIRED: "human approval required" };
-    const hold = holdById.get(a.holdId);
-    const amount = (value) => value == null ? null : `${(Number(value) / 1_000_000).toFixed(2)} USDC`;
-    const mandate = mandates.find((m) => m.id === a.mandateId);
-    const a0 = amount(a.amount);
-    const payee = String(hold?.payee ?? "").replace(/^agent:/, "");
-    let message;
-    let detail;
-    if (failed) {
-      message = `BLOCKED: ${blockedLabels[code] ?? String(code ?? "error").toLowerCase().replaceAll("_", " ")}`;
-      detail = String(a.reason ?? "").replace(/^BLOCKED:\s*/, "");
-    } else if (a.action === "create_mandate") {
-      const created = a0 ?? amount(mandate?.totalBudget);
-      message = `Mandate ${a.mandateId} created${created ? ` · ${created}` : ""}`;
-    }
-    else if (a.action === "hold") message = `Hold${a0 ? ` ${a0}` : ""} → ${payee}`;
-    else if (a.action === "capture") message = `Captured${a0 ? ` ${a0}` : ""}`;
-    else if (a.action === "release") message = `Released${a0 ? ` ${a0}` : ""} to payer`;
-    else if (a.action === "refund") message = `Refunded${a0 ? ` ${a0}` : ""} (budget not restored)`;
-    else if (a.action === "open_dispute") message = `Dispute ${a.disputeId} opened`;
-    else if (a.action === "resolve_dispute") message = String(a.reason ?? "").toLowerCase().includes("approved") ? `Human approved refund${a0 ? ` ${a0}` : ""}` : "Human rejected dispute";
-    else if (a.action === "reset") message = "Mock state reset by human";
-    else message = a.reason;
-    const kind = a.action === "reset" ? "reset" : failed ? "blocked" : kinds[a.action] ?? "blocked";
-    return { key: a.seq ?? `${a.ts}:${index}`, ts: a.ts, kind, ok: !failed, message, detail, code, amount: a.amount, txRef: a.txSig, mandateId: a.mandateId, holdId: a.holdId, disputeId: a.disputeId, payee: hold?.payee };
-  });
-}
-
 // ---------- tool surface ----------
 const localTools = {
   async create_mandate(a) { const m = await svc.createMandate({ actor: a.actor ?? a.payer, payer: a.payer, totalBudget: BigInt(a.totalBudget), perTxCap: BigInt(a.perTxCap), expiresAt: Number(a.expiresAt), allowedCounterparties: a.allowedCounterparties, note: a.note }); mandateIds.push(m?.id ?? m?.mandate?.id); return m; },
@@ -270,11 +239,12 @@ function snapshot() {
     return { ...d, suggestedRefund, refundAmount: d.refundAmount == null ? d.refundAmount : String(d.refundAmount), txRefs: d.txSigs ?? d.txRefs ?? [] };
   });
   const audit = getAudit(), timeline = deriveTimeline(audit, mandates);
+  const ops = impl.kind === "mcp-http" ? remoteCache.ops : (typeof svc.listOperations === "function" ? svc.listOperations() : typeof svc.listOps === "function" ? svc.listOps() : undefined);
   const sigPattern = /^[1-9A-HJ-NP-Za-km-z]{64,90}$/;
   const realSig = audit.some((a) => sigPattern.test(String(a.txSig ?? ""))) || mandates.some((m) => m.holds?.some((h) => [h.lastTxSig, ...(h.txSigs ?? [])].some((r) => sigPattern.test(String(r ?? ""))))) || normalizedDisputes.some((d) => [...(d.txRefs ?? []), ...(d.txSigs ?? [])].some((r) => sigPattern.test(String(r))));
   const chain = impl.kind === "mcp-http" ? (remoteCache.backend === "devnet" ? "devnet" : "mock") : realSig ? "devnet" : "mock";
   const escrow = chain === "mock" ? "escrow (mock)" : "on-chain escrow";
-  return { backend: backendConnecting ? "connecting" : impl.kind, chain, backendNote, cluster: CLUSTER, mandates, disputes: normalizedDisputes, timeline, audit, story: { ...story, caption: story.caption.replaceAll("{escrow}", escrow) } };
+  return { backend: backendConnecting ? "connecting" : impl.kind, chain, backendNote, cluster: CLUSTER, mandates, disputes: normalizedDisputes, timeline, audit, ...(Array.isArray(ops) ? { ops } : {}), story: { ...story, caption: story.caption.replaceAll("{escrow}", escrow) } };
 }
 
 // ---------- demo story ----------

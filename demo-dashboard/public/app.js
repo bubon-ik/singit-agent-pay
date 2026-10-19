@@ -1,4 +1,5 @@
 // SingIt demo dashboard UI — polls /api/state and renders. No framework, no build step.
+import { opsView, renderOpsHtml, activeReservation, fmtUsdc } from "./ops.mjs";
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const B = (v) => { try { return BigInt(v ?? 0); } catch { return 0n; } };
@@ -16,19 +17,21 @@ function txLink(ref) {
     : `<span class="tx" title="mock receipt — becomes a Solana Explorer link with Capture402Backend">${esc(r)}</span>`).join(" ");
 }
 
-function renderMandate(m) {
+function renderMandate(m, ops) {
   const el = $("mandateCard");
   if (!m) { el.innerHTML = `<div class="card-h"><h2>Mandate</h2></div><div class="empty">No mandate yet</div>`; return; }
   const total = B(m.totalBudget), remaining = B(m.remaining ?? total - B(m.committed));
   const holds = m.holds ?? [];
   const captured = holds.reduce((s, h) => s + B(h.captured), 0n), held = holds.reduce((s, h) => s + B(h.held), 0n);
   const refunded = holds.reduce((s, h) => s + B(h.refunded), 0n);
+  const reservation = activeReservation(ops, m.id);
   const exp = new Date(Number(m.expiresAt) * 1000), mins = Math.max(0, Math.round((exp - Date.now()) / 60000));
   el.innerHTML = `
     <div class="card-h"><h2>Mandate ${esc(m.id)}</h2><span class="hint">${esc(m.note ?? "")}</span></div>
     <div class="big">${fmt(remaining)} <small>USDC left of ${fmt(total)}</small></div>
     <div class="meter"><i style="width:${pct(captured, total)}%;background:var(--green)"></i><i style="width:${pct(held, total)}%;background:var(--blue)"></i></div>
     <div class="legend"><span><i class="dot" style="background:var(--green)"></i>captured ${fmt(captured)}</span><span><i class="dot" style="background:var(--blue)"></i>in escrow ${fmt(held)}</span><span><i class="dot" style="background:var(--panel2);border:1px solid var(--line)"></i>free ${fmt(remaining)}</span></div>
+    ${reservation > 0n ? `<div class="reserved">reserved ${esc(fmtUsdc(reservation))} (pending)</div>` : ""}
     <div class="kv">
       <div><span>Per-tx cap</span><b>${fmt(m.perTxCap)} USDC</b></div>
       <div><span>Expires</span><b>${exp.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</b><span>in ${mins} min</span></div>
@@ -49,7 +52,7 @@ function renderHolds(mandates) {
   }).join("");
 }
 
-const ICON = { mandate: "M", hold: "⏸", capture: "✓", release: "↩", refund: "$", blocked: "✕", dispute: "!", resolve: "⚖", reset: "↺" };
+const ICON = { mandate: "M", hold: "⏸", capture: "✓", release: "↩", refund: "$", blocked: "✕", dispute: "!", resolve: "⚖", reset: "↺", unknown: "?", pending: "…", reconcile: "⟳" };
 const renderedTimelineKeys = new Set();
 function renderTimeline(tl) {
   $("evCount").textContent = `${tl.length} events`;
@@ -106,9 +109,16 @@ function renderDispute(disputes) {
 }
 
 function renderAudit(a) {
-  $("audit").innerHTML = a.slice().reverse().map((e) => `<tr><td class="mono">${time(e.ts)}</td><td>${esc(short(e.actor))}</td><td class="mono">${e.action === "reset" ? `<span class="status reset-badge">reset</span>` : esc(e.action)}</td>
+  $("audit").innerHTML = a.slice().reverse().map((e) => {
+    let outcome = e.outcome === "blocked" ? "BLOCKED" : e.outcome?.toUpperCase();
+    let outcomeClass = `o-${e.outcome}`;
+    if (/outcome_unknown/i.test(e.action ?? "") || e.code === "OPERATION_UNKNOWN") { outcome = "UNKNOWN"; outcomeClass = "o-unknown"; }
+    else if (/reconcile/i.test(e.action ?? "")) { outcome = String(e.outcome ?? "").toUpperCase(); outcomeClass = "o-reconcile"; }
+    else if (e.code === "OPERATION_PENDING") { outcome = "PENDING"; outcomeClass = "o-pending"; }
+    return `<tr><td class="mono">${time(e.ts)}</td><td>${esc(short(e.actor))}</td><td class="mono">${e.action === "reset" ? `<span class="status reset-badge">reset</span>` : esc(e.action)}</td>
     <td class="mono">${esc([e.mandateId, e.holdId, e.disputeId].filter(Boolean).join(" "))}</td><td class="mono">${esc(e.amount == null ? "" : (typeof e.amount === "number" || typeof e.amount === "bigint" || /^\d+$/.test(e.amount)) ? `${fmt(e.amount)} USDC` : e.amount)}</td>
-    <td class="o-${esc(e.outcome)}">${esc(e.outcome === "blocked" ? "BLOCKED" : e.outcome?.toUpperCase())}</td><td>${esc(e.reason)}</td></tr>`).join("") || `<tr><td colspan="7" class="empty">Empty</td></tr>`;
+    <td class="${esc(outcomeClass)}">${esc(outcome)}</td><td>${esc(e.reason)}</td></tr>`;
+  }).join("") || `<tr><td colspan="7" class="empty">Empty</td></tr>`;
 }
 
 async function resolve(disputeId, outcome, refundAmount) {
@@ -147,7 +157,14 @@ async function refresh() {
     cardSignatures.set(name, signature);
     render();
   };
-  renderIfChanged("mandate", s.mandates[0] ?? null, () => renderMandate(s.mandates[0]));
+  const mandate = s.mandates[0] ?? null;
+  const reservation = activeReservation(s.ops, mandate?.id);
+  renderIfChanged("mandate", { mandate, reservation: reservation.toString() }, () => renderMandate(mandate, s.ops));
+  const opsCard = $("opsCard");
+  if (Array.isArray(s.ops)) {
+    opsCard.hidden = false;
+    renderIfChanged("ops", { ops: opsView(s.ops), bucket: Math.floor(Date.now() / 5000) }, () => { $("ops").innerHTML = renderOpsHtml(opsView(s.ops)); });
+  } else opsCard.hidden = true;
   renderIfChanged("holds", s.mandates.map((m) => m.holds ?? []), () => renderHolds(s.mandates));
   renderIfChanged("timeline", s.timeline, () => renderTimeline(s.timeline));
   const refundInput = $("refAmt");
