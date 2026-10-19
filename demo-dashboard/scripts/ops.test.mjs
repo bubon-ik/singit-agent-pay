@@ -1,8 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { activeReservation, fmtUsdc, opsView, renderOpsHtml } from "../public/ops.mjs";
+import { activeReservation, fmtUsdc, opsView, renderOpsHtml, storyStartBlocker } from "../public/ops.mjs";
 import { deriveTimeline } from "../lib/derive.mjs";
 import { publicOperation } from "../lib/public-state.mjs";
+
+test("restored live history allows an explicit new story without clearing prior records", () => {
+  const s = { chain: "devnet", story: { state: "idle" }, timeline: [{ kind: "blocked" }], ops: [{ state: "failed" }], disputes: [] };
+  const before = JSON.stringify(s);
+  assert.equal(storyStartBlocker(s), null);
+  assert.equal(JSON.stringify(s), before);
+  assert.ok(storyStartBlocker({ ...s, chain: "mock" }));
+  assert.ok(storyStartBlocker({ ...s, story: { state: "error" } }));
+  assert.ok(storyStartBlocker({ ...s, ops: undefined }));
+  assert.ok(storyStartBlocker({ ...s, disputes: [{ status: "open" }] }));
+});
+for (const state of ["pending", "unknown"]) test(`an original ${state} operation blocks a fresh live story`, () => {
+  assert.ok(storyStartBlocker({ chain: "devnet", story: { state: "idle" }, ops: [{ state }] }));
+});
 
 for (const state of ["pending", "unknown", "succeeded", "failed"]) {
   test(`dashboard ${state} operations redact upstream and in-process evidence without mutation`, () => {

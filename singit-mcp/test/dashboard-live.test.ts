@@ -113,3 +113,38 @@ test("unexpected payment failure stops the story without later economic steps", 
     expect(app.backend.refundCalls).toBe(0);
   } finally { await app.dispose(); }
 }, 10000);
+
+test("restored definite failure keeps its history and needs confirmation for a new live story", async () => {
+  const app = await fixture("devnet");
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const mandate = await app.service.createMandate({ actor: "human", payer, totalBudget: 10_000_000n, perTxCap: 4_000_000n, expiresAt: now + 7200, allowedCounterparties: [merchant] });
+    app.backend.queueHoldFault("definite-before");
+    await expect(app.service.hold({ actor: payer, mandateId: mandate.id, payee: merchant, amount: 3_000_000n })).rejects.toMatchObject({ code: "BACKEND_ERROR" });
+    const original = JSON.stringify(app.service.listOperations()[0]);
+    await app.until(s => s.story.state === "idle" && s.ops?.some((op: any) => op.state === "failed"));
+    expect((await app.post("/api/story")).body.code).toBe("DEVNET_CONFIRMATION_REQUIRED");
+    expect(app.backend.holdCalls).toBe(1);
+    expect((await app.post("/api/story", { confirmedDevnet: true, delay: 0 })).status).toBe(202);
+    const waiting = await app.until(s => s.story.state === "awaiting-human" || s.story.state === "error");
+    expect(waiting.story.state).toBe("awaiting-human");
+    expect(waiting.mandates).toHaveLength(2);
+    expect(JSON.stringify(app.service.listOperations()[0])).toBe(original);
+    expect(waiting.audit.some((a: any) => a.action === "hold" && a.code === "BACKEND_ERROR")).toBe(true);
+    expect(app.backend.holdCalls).toBe(3);
+  } finally { await app.dispose(); }
+}, 10000);
+
+test("an original UNKNOWN blocks a new live story before another mandate or hold", async () => {
+  const app = await fixture("devnet");
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const mandate = await app.service.createMandate({ actor: "human", payer, totalBudget: 10_000_000n, perTxCap: 4_000_000n, expiresAt: now + 7200, allowedCounterparties: [merchant] });
+    app.backend.queueHoldFault("ambiguous-before");
+    await expect(app.service.hold({ actor: payer, mandateId: mandate.id, payee: merchant, amount: 3_000_000n })).rejects.toMatchObject({ code: "OPERATION_UNKNOWN" });
+    await app.until(s => s.ops?.some((op: any) => op.state === "unknown"));
+    expect((await app.post("/api/story", { confirmedDevnet: true, delay: 0 })).status).toBe(409);
+    expect(app.service.listMandates()).toHaveLength(1);
+    expect(app.backend.holdCalls).toBe(1);
+  } finally { await app.dispose(); }
+}, 10000);

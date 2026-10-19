@@ -8,6 +8,7 @@ import { extname, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as local from "./adapter/local-service.mjs";
 import { deriveTimeline } from "./lib/derive.mjs";
+import { storyStartBlocker } from "./public/ops.mjs";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 5173);
@@ -289,7 +290,7 @@ async function waitForNext(gen) {
   story.nextInMs = null; return gen === storyGen;
 }
 async function runStory({ delay = DEFAULT_DELAY_MS, autoApprove = false, mode = "presenter" } = {}) {
-  if (story.state !== "idle" || (impl.kind !== "mcp-http" && snapshot().timeline.length > 0)) return { ok: false, code: "NOT_IDLE", message: "Results are on screen — press Reset first" };
+  if (storyStartBlocker(snapshot())) return { ok: false, code: "NOT_IDLE", message: "The current state does not allow a new story" };
   const gen = storyGen, now = Math.floor(Date.now() / 1000); let mandateId, h1, h2, disputeId;
   const AGENTS = snapshot().chain === "devnet" ? liveAgents() : MOCK_AGENTS;
   if (!AGENTS) throw Error("Live story requires payer and merchant public addresses");
@@ -347,7 +348,8 @@ createServer(async (req, res) => {
       const b = await readBody(req), current = snapshot();
       if (current.storyBlocker) return json(res, 503, { ok: false, code: "BACKEND_UNAVAILABLE", message: current.storyBlocker });
       if (current.chain === "devnet" && (b.confirmedDevnet !== true || b.autoApprove)) return json(res, 409, { ok: false, code: "DEVNET_CONFIRMATION_REQUIRED", message: "Confirm the 7 USDC gross devnet story; dispute resolution requires a separate human click" });
-      if (story.state !== "idle" || (impl.kind !== "mcp-http" && current.timeline.length)) return json(res, 409, { ok: false, code: "NOT_IDLE", message: "Results are on screen — press Reset first" });
+      const blocker = storyStartBlocker(current);
+      if (blocker) return json(res, 409, { ok: false, code: "NOT_IDLE", message: blocker });
       runStory({ delay: parseDelay(b.delay), autoApprove: !!b.autoApprove, mode: b.mode ?? "presenter" }).catch((e) => { story.state = "error"; story.label = e.message; });
       return json(res, 202, { ok: true });
     }

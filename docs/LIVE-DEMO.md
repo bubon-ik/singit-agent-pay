@@ -67,3 +67,9 @@ does not support a durable operation journal without its ledger.
 environment and requires a devnet MCP upstream. Public state excludes original
 signed wires and idempotency keys. The browser receives neither wallet keys nor
 the human route secret.
+
+After a stopped run, restarting the dashboard restores its idle controls while
+retaining the MCP journal and audit history. A new devnet story requires a new
+confirmation and is blocked while any original operation is pending/UNKNOWN or
+a dispute is open. It does not resume or reset the failed run. Investigate and
+retain that run's original evidence before confirming any new economic actions.
