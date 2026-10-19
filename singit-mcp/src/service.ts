@@ -548,6 +548,9 @@ export class PaymentService {
 
   private finalizeOpSucceeded(op: OperationRecord, result: { holdId?: string; txSig?: string }, holdIdForLock: string | null): void {
     op.state = "succeeded";
+    // Confirmed holds are represented by mandate.committed; only unresolved holds
+    // count as reservations in the operation journal.
+    op.reservation = "0";
     op.result = result;
     op.updatedAt = this.now();
     if (holdIdForLock && this.holdLocks.get(holdIdForLock) === op.id) this.holdLocks.delete(holdIdForLock);
@@ -783,6 +786,9 @@ export class PaymentService {
     const mismatched = status.mint !== this.mint || status.maximum !== amount || status.payer !== mandate.payer || status.payee !== payee;
     if (mismatched) {
       op.state = "succeeded";
+      // Cleanup owns the still committed funds; this op's reservation no longer
+      // contributes to the pending/unknown reservation total.
+      op.reservation = "0";
       op.result = { holdId, txSig };
       op.updatedAt = this.now();
       if (this.holdLocks.get(holdId) === op.id) this.holdLocks.delete(holdId);
