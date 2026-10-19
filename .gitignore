@@ -22,7 +22,8 @@ id.json
 *.mp4
 *.mov
 *.gif
-demo-dashboard/backup/
+demo-dashboard/backup/*.mp4
+demo-dashboard/backup/*.gif
 # OS / editor
 .DS_Store
 .vscode/
