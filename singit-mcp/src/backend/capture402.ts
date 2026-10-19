@@ -18,10 +18,12 @@ import {
   getBase64Decoder,
   getBase64EncodedWireTransaction,
   getSignatureFromTransaction,
+  isSolanaError,
   partiallySignTransaction,
   pipe,
   setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash,
+  SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR,
   type Address,
   type Instruction,
   type KeyPairSigner,
@@ -63,6 +65,7 @@ import {
   type TxReceipt,
   type UnknownOperation,
 } from "./types.js";
+import { RpcRequestScheduler } from "./rpc-request-scheduler.js";
 
 export const CAPTURE402_ABI_COMMIT = "236b09a44240d285ee6f33d2e8dac79f81058e3d";
 export const DEVNET_GENESIS_HASH =
@@ -107,6 +110,10 @@ export interface Capture402Config {
   executableSha256: string;
   deploymentSlot: bigint;
   confirmationTimeoutMs?: number;
+  /** Space RPC starts within this backend instance; independent of provider quotas. */
+  rpcMinIntervalMs?: number;
+  /** Only read-side HTTP 429 responses may retry, at most three times. */
+  rpcReadRetries?: number;
 }
 
 /** HTTPS provider policy from capture402 integration/src/operator-rpc.ts; genesis is checked separately. */
@@ -234,6 +241,7 @@ export class Capture402Backend implements PaymentBackend {
   private readonly loadSigner: typeof loadDevnetSigner;
   private uncertain?: UnknownOperation;
   private busy = false;
+  private readonly scheduler: RpcRequestScheduler;
   private readonly retainBeforeSend?: Capture402Dependencies["retainBeforeSend"];
   private readonly retainFinalized?: Capture402Dependencies["retainFinalized"];
 
@@ -268,6 +276,14 @@ export class Capture402Backend implements PaymentBackend {
         "invalid_config",
         "Positive confirmation timeout required",
       );
+    }
+    try {
+      this.scheduler = new RpcRequestScheduler(
+        config.rpcMinIntervalMs ?? 100,
+        config.rpcReadRetries ?? 3,
+      );
+    } catch {
+      throw new BackendError("invalid_config", "Invalid RPC scheduling limits");
     }
     this.rpc = dependencies.rpc ?? createSolanaRpc(config.rpcUrl);
     this.loadSigner = dependencies.loadSigner ?? loadDevnetSigner;
@@ -305,14 +321,24 @@ export class Capture402Backend implements PaymentBackend {
       this.busy = false;
     }
   }
-  private async read<T>(fn: () => Promise<T>): Promise<T> {
+  private async read<T>(
+    method: string,
+    fn: (options: ReturnType<typeof rpcOptions>) => Promise<T>,
+    signal = rpcOptions().abortSignal,
+  ): Promise<T> {
     try {
-      return await fn();
+      return await this.scheduler.read(signal, abortSignal => fn({ abortSignal }));
     } catch (err) {
       if (err instanceof BackendError) throw err;
+      const http = isSolanaError(err, SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR)
+        ? ` (HTTP ${err.context.statusCode})`
+        : "";
+      const message = `RPC ${method} read failed${http}; absence or transaction failure is not established`;
+      // Fixed method names and numeric HTTP status only; never log provider exceptions.
+      console.error(`capture402: ${message}`);
       throw new BackendError(
         "rpc_unavailable",
-        "RPC read failed; absence or transaction failure is not established",
+        message,
       );
     }
   }
@@ -320,14 +346,14 @@ export class Capture402Backend implements PaymentBackend {
     id: Address,
     minContextSlot?: bigint,
   ): Promise<Account | null> {
-    return this.read(async () => {
+    return this.read("getAccountInfo", async options => {
       const { value, context } = await this.rpc
         .getAccountInfo(id, {
           encoding: "base64",
           commitment: COMMITMENT,
           ...(minContextSlot === undefined ? {} : { minContextSlot }),
         })
-        .send(rpcOptions());
+        .send(options);
       if (
         minContextSlot !== undefined &&
         (!context ||
@@ -352,8 +378,8 @@ export class Capture402Backend implements PaymentBackend {
   }
 
   private async environment(): Promise<void> {
-    const genesis = await this.read(() =>
-      this.rpc.getGenesisHash().send(rpcOptions()),
+    const genesis = await this.read("getGenesisHash", options =>
+      this.rpc.getGenesisHash().send(options),
     );
     if (genesis !== DEVNET_GENESIS_HASH)
       throw new BackendError(
@@ -585,19 +611,19 @@ export class Capture402Backend implements PaymentBackend {
     await this.token(server);
     const vault = await this.account(await ata(payment, address(req.mint)));
     if (vault) await this.token(payment, true);
-    const paymentRent = await this.read(() =>
+    const paymentRent = await this.read("getMinimumBalanceForRentExemption", options =>
       this.rpc
         .getMinimumBalanceForRentExemption(BigInt(PAYMENT_LEN), {
           commitment: COMMITMENT,
         })
-        .send(rpcOptions()),
+        .send(options),
     );
     const vaultRent = vault
       ? 0n
-      : await this.read(() =>
+      : await this.read("getMinimumBalanceForRentExemption", options =>
           this.rpc
             .getMinimumBalanceForRentExemption(165n, { commitment: COMMITMENT })
-            .send(rpcOptions()),
+            .send(options),
         );
     const rent =
       (paymentRent > (existing?.lamports ?? 0n)
@@ -645,28 +671,24 @@ export class Capture402Backend implements PaymentBackend {
       payerUsdc: await this.token(payer),
       merchantUsdc: await this.token(merchant),
       payerLamports: (
-        await this.read(() =>
-          this.rpc
-            .getBalance(payer, { commitment: COMMITMENT })
-            .send(rpcOptions()),
+        await this.read("getBalance", options =>
+          this.rpc.getBalance(payer, { commitment: COMMITMENT }).send(options),
         )
       ).value,
       merchantLamports: (
-        await this.read(() =>
-          this.rpc
-            .getBalance(merchant, { commitment: COMMITMENT })
-            .send(rpcOptions()),
+        await this.read("getBalance", options =>
+          this.rpc.getBalance(merchant, { commitment: COMMITMENT }).send(options),
         )
       ).value,
-      paymentRent: await this.read(() =>
+      paymentRent: await this.read("getMinimumBalanceForRentExemption", options =>
         this.rpc
           .getMinimumBalanceForRentExemption(176n, { commitment: COMMITMENT })
-          .send(rpcOptions()),
+          .send(options),
       ),
-      vaultRent: await this.read(() =>
+      vaultRent: await this.read("getMinimumBalanceForRentExemption", options =>
         this.rpc
           .getMinimumBalanceForRentExemption(165n, { commitment: COMMITMENT })
-          .send(rpcOptions()),
+          .send(options),
       ),
       now: await this.clock(),
     };
@@ -843,10 +865,10 @@ export class Capture402Backend implements PaymentBackend {
       // Import the durable reservation before reads; an RPC error must not unlock a restarted instance.
       this.uncertain = Object.freeze({ ...evidence });
       await this.environment();
-      const epoch = await this.read(() =>
-        this.rpc.getEpochInfo({ commitment: COMMITMENT }).send(rpcOptions()),
+      const epoch = await this.read("getEpochInfo", options =>
+        this.rpc.getEpochInfo({ commitment: COMMITMENT }).send(options),
       );
-      const { value } = await this.read(() =>
+      const { value } = await this.read("getSignatureStatuses", options =>
         this.rpc
           .getSignatureStatuses(
             [
@@ -858,7 +880,7 @@ export class Capture402Backend implements PaymentBackend {
             ],
             { searchTransactionHistory: true },
           )
-          .send(rpcOptions()),
+          .send(options),
       );
       if (!Array.isArray(value) || value.length !== 1)
         throw new BackendError(
@@ -1038,10 +1060,10 @@ export class Capture402Backend implements PaymentBackend {
     options?: SubmitContext,
   ): Promise<TxReceipt> {
     this.writable();
-    const { value: lifetime } = await this.read(() =>
+    const { value: lifetime } = await this.read("getLatestBlockhash", options =>
       this.rpc
         .getLatestBlockhash({ commitment: COMMITMENT })
-        .send(rpcOptions()),
+        .send(options),
     );
     const message = pipe(
       createTransactionMessage({ version: "legacy" }),
@@ -1051,23 +1073,23 @@ export class Capture402Backend implements PaymentBackend {
     );
     const unsigned = compileTransaction(message);
     const messageBase64 = getBase64Decoder().decode(unsigned.messageBytes);
-    const { value: fee } = await this.read(() =>
+    const { value: fee } = await this.read("getFeeForMessage", options =>
       this.rpc
         .getFeeForMessage(
           messageBase64 as Parameters<Capture402Rpc["getFeeForMessage"]>[0],
           { commitment: COMMITMENT },
         )
-        .send(rpcOptions()),
+        .send(options),
     );
     if (fee === null)
       throw new BackendError(
         "fee_unavailable",
         "Fee quote unavailable; nothing sent",
       );
-    const balance = await this.read(() =>
+    const balance = await this.read("getBalance", options =>
       this.rpc
         .getBalance(signer.address, { commitment: COMMITMENT })
-        .send(rpcOptions()),
+        .send(options),
     );
     if (balance.value < rent + fee)
       throw new BackendError(
@@ -1077,14 +1099,14 @@ export class Capture402Backend implements PaymentBackend {
     const tx = await partiallySignTransaction([signer.keyPair], unsigned);
     const txSig = getSignatureFromTransaction(tx);
     const wire = getBase64EncodedWireTransaction(tx);
-    const simulation = await this.read(() =>
+    const simulation = await this.read("simulateTransaction", options =>
       this.rpc
         .simulateTransaction(wire, {
           encoding: "base64",
           commitment: COMMITMENT,
           sigVerify: true,
         })
-        .send(rpcOptions()),
+        .send(options),
     );
     if (simulation.value.err !== null)
       throw new BackendError(
@@ -1126,6 +1148,8 @@ export class Capture402Backend implements PaymentBackend {
       );
     }
     try {
+      const options = rpcOptions();
+      await this.scheduler.pace(options.abortSignal);
       const returned = await this.rpc
         .sendTransaction(wire, {
           encoding: "base64",
@@ -1133,13 +1157,17 @@ export class Capture402Backend implements PaymentBackend {
           preflightCommitment: COMMITMENT,
           maxRetries: 0n,
         })
-        .send(rpcOptions());
+        .send(options);
       if (returned !== txSig) throw Error("Signature mismatch");
       const end = Date.now() + (this.config.confirmationTimeoutMs ?? 60_000);
       while (Date.now() < end) {
-        const { value } = await this.rpc
-          .getSignatureStatuses([txSig], { searchTransactionHistory: true })
-          .send(rpcOptions());
+        const { value } = await this.read(
+          "getSignatureStatuses",
+          options => this.rpc
+            .getSignatureStatuses([txSig], { searchTransactionHistory: true })
+            .send(options),
+          AbortSignal.timeout(Math.min(15_000, Math.max(1, end - Date.now()))),
+        );
         const status = value[0];
         if (status?.confirmationStatus === COMMITMENT) {
           if (!Object.hasOwn(status, "err") || status.err === undefined)
@@ -1158,6 +1186,7 @@ export class Capture402Backend implements PaymentBackend {
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
     } catch (err) {
+      this.scheduler.noteRateLimit(err); // Cool down observation, never repeat this send.
       if (err instanceof BackendError && err.phase === "confirmed_failure")
         throw err;
       throw new BackendOutcomeUnknown(evidence);

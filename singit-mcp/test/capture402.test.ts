@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 import {
   address,
   createKeyPairSignerFromPrivateKeyBytes,
@@ -13,6 +13,8 @@ import {
   getCompiledTransactionMessageDecoder,
   getSignatureFromTransaction,
   getTransactionDecoder,
+  SolanaError,
+  SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR,
   type Address,
   type Instruction,
 } from "@solana/kit";
@@ -89,6 +91,7 @@ async function fixture() {
     payerKeypairPath: "payer",
     merchantKeypairPath: "merchant",
     confirmationTimeoutMs: 10,
+    rpcMinIntervalMs: 0,
   };
   const loader = address("BPFLoaderUpgradeab1e11111111111111111111111");
   const pb = Buffer.alloc(36);
@@ -127,6 +130,8 @@ async function fixture() {
     sent: [] as string[],
     instructions: [] as Instruction[],
     calls: [] as string[],
+    requests: [] as { method: string; args: unknown[] }[],
+    rpcErrors: new Map<string, unknown[]>(),
     failRead: false,
     lostSend: false,
     lostConfirmation: false,
@@ -216,6 +221,9 @@ async function fixture() {
         return (...args: unknown[]) => ({
           send: async () => {
             f.calls.push(method);
+            f.requests.push({ method, args });
+            const errors = f.rpcErrors.get(method);
+            if (errors?.length) throw errors.shift();
             switch (method) {
               case "getGenesisHash":
                 if (f.failRead) throw Error("secret RPC URL");
@@ -308,6 +316,69 @@ const code = async (p: Promise<unknown>, c: string) =>
     code: c,
     phase: "validation",
   });
+const rateLimit = (statusCode = 429) => new SolanaError(
+  SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR,
+  { statusCode, message: "SYNTHETIC_PRIVATE_PROVIDER_DETAIL", headers: new Headers({ "Retry-After": "0" }) },
+);
+
+test.each(["getFeeForMessage", "simulateTransaction", "getSignatureStatuses"])(
+  "HTTP 429 on %s repeats only the same read and submits the original wire once",
+  async method => {
+    f.config.confirmationTimeoutMs = 100;
+    f.rpcErrors.set(method, [rateLimit()]);
+    const prepared: PreparedTx[] = [];
+    const receipt = await f.backend.hold(req(), { onPrepared: async p => { prepared.push(p); } });
+    const repeated = f.requests.filter(r => r.method === method);
+    expect(repeated).toHaveLength(2);
+    expect(repeated[0].args).toEqual(repeated[1].args);
+    expect(f.calls.filter(m => m === "getLatestBlockhash")).toHaveLength(1);
+    expect(f.calls.filter(m => m === "sendTransaction")).toHaveLength(1);
+    expect(prepared).toHaveLength(1);
+    expect(f.sent).toEqual([prepared[0].evidence!.signedTransaction]);
+    expect(receipt.txSig).toBe(prepared[0].txSig);
+    expect(f.backend.pendingOperation).toBeUndefined();
+  },
+);
+
+test("exhausted read-side 429 is bounded, reports its method/status and leaks no provider detail", async () => {
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    f.rpcErrors.set("getFeeForMessage", Array.from({ length: 4 }, () => rateLimit()));
+    await expect(f.backend.hold(req())).rejects.toMatchObject({
+      code: "rpc_unavailable", phase: "validation",
+      message: "RPC getFeeForMessage read failed (HTTP 429); absence or transaction failure is not established",
+    });
+    expect(f.calls.filter(m => m === "getFeeForMessage")).toHaveLength(4);
+    expect(f.calls).not.toContain("sendTransaction");
+    expect(f.backend.pendingOperation).toBeUndefined();
+    expect(JSON.stringify(log.mock.calls)).not.toContain("SYNTHETIC_PRIVATE_PROVIDER_DETAIL");
+  } finally { log.mockRestore(); }
+});
+
+test("send-side 429 preserves UNKNOWN and never retries, regenerates a blockhash or sends a replacement", async () => {
+  f.rpcErrors.set("sendTransaction", [rateLimit()]);
+  await expect(f.backend.hold(req())).rejects.toBeInstanceOf(BackendOutcomeUnknown);
+  const original = f.backend.pendingOperation!;
+  expect(original.signature).toBeTruthy();
+  expect(f.calls.filter(m => m === "sendTransaction")).toHaveLength(1);
+  expect(f.calls.filter(m => m === "getLatestBlockhash")).toHaveLength(1);
+  await code(f.backend.hold(req({ salt: "bb".repeat(32) })), "reconciliation_required");
+  expect(f.backend.pendingOperation).toBe(original);
+  expect(f.calls.filter(m => m === "sendTransaction")).toHaveLength(1);
+});
+
+test("exhausted confirmation 429 retains the original evidence after one send", async () => {
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    f.config.confirmationTimeoutMs = 100;
+    f.rpcErrors.set("getSignatureStatuses", Array.from({ length: 4 }, () => rateLimit()));
+    await expect(f.backend.hold(req())).rejects.toBeInstanceOf(BackendOutcomeUnknown);
+    expect(f.calls.filter(m => m === "getSignatureStatuses")).toHaveLength(4);
+    expect(f.calls.filter(m => m === "sendTransaction")).toHaveLength(1);
+    expect(f.backend.pendingOperation!.signedTransaction).toBe(f.sent[0]);
+  } finally { log.mockRestore(); }
+});
+
 runBackendContract(
   "Capture402Backend (offline signed RPC harness)",
   async () => {

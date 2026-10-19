@@ -34,6 +34,16 @@ balances on the actual operator host.
 
 ## Restarts and private state
 
+The live backend spaces RPC requests by at least 100 ms within one instance.
+Only read-side HTTP 429 responses retry, at most three times, using `Retry-After`
+or bounded backoff within the original request deadline. This includes simulation
+of the same signed bytes and observation of the original signature. Submission
+uses one paced `sendTransaction` call with `maxRetries: 0`; a send-side error or
+exhausted confirmation remains UNKNOWN, with its original wire and reservation.
+An exhausted read reports its method and numeric HTTP status in stderr and state;
+provider URLs, headers and messages are never logged. Pacing does not coordinate
+other applications sharing the provider or establish its current quota.
+
 The live MCP entrypoint requires `SINGIT_STATE_DIR`, creates a mode-700 directory
 and mode-600 journal, and exclusively locks that directory while running. It
 restores mandates, holds, disputes and private operation evidence. Before exposing
