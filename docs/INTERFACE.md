@@ -1,4 +1,4 @@
-<!-- Mirror of singit-mcp/INTERFACE.md at singit-mcp 056f9e2. Edit singit-mcp/INTERFACE.md; this copy is regenerated. -->
+<!-- Mirror of singit-mcp/INTERFACE.md at singit-mcp 6991909. Edit singit-mcp/INTERFACE.md; this copy is regenerated. -->
 # PaymentBackend contract (for the capture402 integration)
 
 Implement `PaymentBackend` from [`src/backend/types.ts`](../singit-mcp/src/backend/types.ts). The MCP server checks every
@@ -73,6 +73,8 @@ Schema: `AuditEntry` in [`src/audit.ts`](../singit-mcp/src/audit.ts). Fields are
   outcome /*"ok"|"blocked"|"error"*/, code /*RefusalCode|null*/, reason,
   mandateId, holdId, disputeId, amount /*base units string*/, txSig, held, refundable /*escrow state after*/ }
 ```
+
+`amount` is the base-unit amount of the action: `totalBudget` for `create_mandate`, the held/captured/released/refunded amount for the escrow actions, the refund for an approved `resolve_dispute`; `null` where there is no amount (e.g. `open_dispute`, a rejected dispute).
 
 **On-chain rules (mirrored by MockBackend):**
 - `authorize`: `maximum > 0`, `now < captureDeadline <= refundDeadline`, payer ≠ server. The full maximum moves into the vault (`held = maximum`, `refundable = 0`).
