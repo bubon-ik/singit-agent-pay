@@ -35,7 +35,12 @@ export function deriveTimeline(audit, mandates) {
     else if (a.action === "release") message = `Released${a0 ? ` ${a0}` : ""} to payer`;
     else if (a.action === "refund") message = `Refunded${a0 ? ` ${a0}` : ""} (budget not restored)`;
     else if (a.action === "open_dispute") message = `Dispute ${a.disputeId} opened`;
-    else if (a.action === "resolve_dispute") message = String(a.reason ?? "").toLowerCase().includes("approved") ? `Human approved refund${a0 ? ` ${a0}` : ""}` : "Human rejected dispute";
+    else if (a.action === "resolve_dispute") {
+      const reason = String(a.reason ?? "");
+      if (/\brejected\b/i.test(reason)) message = "Human rejected dispute";
+      else if (/refund|approved/i.test(reason) || (a.amount != null && Number(a.amount) > 0)) message = `Human approved refund${a0 ? ` ${a0}` : ""}`;
+      else message = "Dispute resolved";
+    }
     else if (a.action === "reset") message = "Mock state reset by human";
     else message = a.reason;
     const kind = code === "OPERATION_UNKNOWN" || /outcome_unknown/i.test(a.action ?? "") ? "unknown" : code === "OPERATION_PENDING" ? "pending" : /reconcile/i.test(a.action ?? "") ? "reconcile" : a.action === "reset" ? "reset" : failed ? "blocked" : kinds[a.action] ?? "blocked";

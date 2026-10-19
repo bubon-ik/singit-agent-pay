@@ -67,6 +67,9 @@ const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&
 
 export function renderOpsHtml(view) {
   if (!view || (!view.active.length && !view.recent.length)) return `<div class="empty">No in-flight operations</div>`;
-  const rows = [...view.active, ...view.recent].map((op) => `<div class="op ${esc(op.cls)}"><span class="op-label">${op.state === "pending" ? `<span class="spin"></span>` : ""}${esc(op.label)}</span><span class="op-action">${esc(op.action)}</span>${op.amount ? `<span>${esc(op.amount)}</span>` : ""}${op.reservation && op.reservation !== "0 USDC" ? `<span>reserved ${esc(op.reservation)}</span>` : ""}${op.txSig ? op.explorer ? `<a class="tx" target="_blank" rel="noopener noreferrer" href="${esc(op.explorer)}">${esc(op.txSig.slice(0, 8))}…↗</a>` : `<span class="tx">${esc(op.txSig)}</span>` : ""}${op.error ? `<span>${esc(op.error)}</span>` : ""}</div>`).join("");
+  const rows = [...view.active, ...view.recent].map((op) => {
+    const isActive = op.state === "pending" || op.state === "unknown";
+    return `<div class="op ${esc(op.cls)}"><span class="op-label">${op.state === "pending" ? `<span class="spin"></span>` : ""}${esc(op.label)}</span><span class="op-action">${esc(op.action)}</span>${op.amount != null ? `<span>${esc(op.amount)}</span>` : ""}${isActive && op.reservation && op.reservation !== "0 USDC" ? `<span>reserved ${esc(op.reservation)}</span>` : ""}${op.txSig ? op.explorer ? `<a class="tx" target="_blank" rel="noopener noreferrer" href="${esc(op.explorer)}">${esc(op.txSig.slice(0, 8))}…↗</a>` : `<span class="tx">${esc(op.txSig)}</span>` : ""}${op.error ? `<span>${esc(op.error)}</span>` : ""}</div>`;
+  }).join("");
   return `${rows}${view.collapsed > 0 ? `<div class="ops-muted">+${view.collapsed} older settled ops hidden</div>` : ""}`;
 }

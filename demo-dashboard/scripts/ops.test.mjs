@@ -56,3 +56,22 @@ test("accepts unix-seconds timestamps from singit-mcp", () => {
   assert.equal(activeReservation(ops), 2_000_000n);
 });
 
+
+test("resolve_dispute titles follow singit-mcp reasons", () => {
+  const audit = [
+    { seq: 1, ts: 0, action: "resolve_dispute", outcome: "ok", reason: "dispute d-1 resolved: refunded 4.00 USDC", amount: "4000000" },
+    { seq: 2, ts: 0, action: "resolve_dispute", outcome: "ok", reason: "dispute d-1 resolved: rejected", amount: null },
+    { seq: 3, ts: 0, action: "resolve_dispute", outcome: "ok", reason: "dispute d-1 approved by human: refund 1.00 USDC", amount: "1000000" },
+  ];
+  const timeline = deriveTimeline(audit, []);
+  assert.ok(timeline[0].message.startsWith("Human approved refund"));
+  assert.match(timeline[0].message, /4\.00 USDC/);
+  assert.equal(timeline[1].message, "Human rejected dispute");
+  assert.ok(timeline[2].message.startsWith("Human approved refund"));
+  assert.match(timeline[2].message, /1\.00 USDC/);
+
+  const now = Date.now();
+  const succeededOp = { id: "s1", action: "hold", state: "succeeded", reservation: "3000000", params: { amount: "3000000" }, createdAt: now - 1000, updatedAt: now - 1000 };
+  const html = renderOpsHtml(opsView([succeededOp], now));
+  assert.ok(!html.includes("reserved 3.00"));
+});

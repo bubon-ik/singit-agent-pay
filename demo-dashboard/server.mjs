@@ -286,7 +286,7 @@ function markDone() { if (story.state === "awaiting-human") { story.state = "don
 const parseDelay = (v) => (v === null || v === "manual" ? Infinity : v === undefined ? DEFAULT_DELAY_MS : Number(v));
 
 // ---------- HTTP ----------
-const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml" };
+const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png" };
 const json = (res, code, body) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(body, (_k, v) => (typeof v === "bigint" ? v.toString() : v === Infinity ? null : v))); };
 const readBody = async (req) => { let s = ""; for await (const c of req) s += c; return s ? JSON.parse(s) : {}; };
 createServer(async (req, res) => {
