@@ -96,7 +96,7 @@ Use a secret at least 16 characters long. `amount` is in USDC base units and is 
 
 `MockBackend` is the default in-memory backend for demos and tests. Set `SINGIT_BACKEND=capture402` to select `Capture402Backend`; it is currently a stub for the teammate integration. See [INTERFACE.md](INTERFACE.md) for the `PaymentBackend` contract and expected capture402 behavior.
 
-Default mock balances (`DEFAULT_MOCK_BALANCES`): `buyer-agent` and `agent:research-bot` 100 USDC; `seller-agent`, `data-vendor`, `gpu-broker`, `agent:data-vendor` and `agent:gpu-broker` 20 USDC. `SINGIT_MOCK_BALANCES` (JSON of address to base units, e.g. `'{"agent:research-bot":"100000000"}'`) replaces them entirely. `POST /human/reset` (mock only, human secret header) restores them and clears all state.
+Default mock balances (`DEFAULT_MOCK_BALANCES`): `buyer-agent` and `agent:research-bot` 100 USDC; `seller-agent`, `agent:data-vendor` and `agent:gpu-broker` 20 USDC. `SINGIT_MOCK_BALANCES` (JSON of address to base units, e.g. `'{"agent:research-bot":"100000000"}'`) replaces them entirely. `POST /human/reset` (mock only, human secret header) restores them and clears all state.
 
 ## Safety
 

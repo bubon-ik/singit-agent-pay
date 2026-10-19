@@ -126,10 +126,10 @@ test("/human/reset: correct secret resets state to defaults", async () => {
       totalBudget: 10_000_000n,
       perTxCap: 10_000_000n,
       expiresAt: Math.floor(Date.now() / 1000) + 100_000,
-      allowedCounterparties: ["data-vendor"],
+      allowedCounterparties: ["agent:data-vendor"],
     });
     expect(mandate.id).toBe("m-1");
-    const hold = await current.hold({ actor: "agent:research-bot", mandateId: mandate.id, payee: "data-vendor", amount: 5_000_000n });
+    const hold = await current.hold({ actor: "agent:research-bot", mandateId: mandate.id, payee: "agent:data-vendor", amount: 5_000_000n });
     expect(hold.held).toBe(5_000_000n);
   } finally {
     await closeServer(server);
@@ -197,7 +197,7 @@ test("MockBackend default balances: agent:research-bot can hold 100 USDC but not
   await ok.hold({
     payer: "agent:research-bot",
     mint: DEVNET_USDC_MINT,
-    payee: "data-vendor",
+    payee: "agent:data-vendor",
     maximum: 100_000_000n,
     captureDeadline: now + 3600,
     refundDeadline: now + 7200,
@@ -209,7 +209,7 @@ test("MockBackend default balances: agent:research-bot can hold 100 USDC but not
     tooMuch.hold({
       payer: "agent:research-bot",
       mint: DEVNET_USDC_MINT,
-      payee: "data-vendor",
+      payee: "agent:data-vendor",
       maximum: 100_000_001n,
       captureDeadline: now + 3600,
       refundDeadline: now + 7200,
