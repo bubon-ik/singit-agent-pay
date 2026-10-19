@@ -1,5 +1,16 @@
 export const isRealSig = (s) => /^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(String(s ?? ""));
 
+/** A new live story keeps history and requires a fresh confirmation; it never resets a run. */
+export function storyStartBlocker(s) {
+  if (s.storyBlocker) return s.storyBlocker;
+  if (s.story?.state !== "idle") return "The current story must finish before another can start";
+  if (s.chain !== "devnet") return s.timeline?.length ? "Results stay on screen — press Reset to replay" : null;
+  if (!Array.isArray(s.ops)) return "Operation journal unavailable; check the MCP state";
+  if (s.ops.some(op => op.state === "pending" || op.state === "unknown")) return "Resolve the original pending or UNKNOWN operation before a new story";
+  if (s.disputes?.some(d => d.status === "open")) return "Decide the existing dispute before a new story";
+  return null;
+}
+
 export function fmtUsdc(baseUnits) {
   let value;
   try { value = BigInt(baseUnits); } catch { return null; }

@@ -2,6 +2,8 @@ SingIt Agent Pay
 
 This product includes Capture402 ABI helpers from starPaw/capture402-solana,
 commit 236b09a44240d285ee6f33d2e8dac79f81058e3d, under Apache-2.0.
+The RPC request scheduler is from the same public upstream at commit
+f102364bcd6b256156c2b16cba26360ceb145de4, also under Apache-2.0.
 
 SVM Auth-Capture
 Copyright 2026 SVM Auth-Capture contributors

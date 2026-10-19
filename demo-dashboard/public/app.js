@@ -1,5 +1,5 @@
 // SingIt demo dashboard UI — polls /api/state and renders. No framework, no build step.
-import { opsView, renderOpsHtml, activeReservation, fmtUsdc } from "./ops.mjs";
+import { opsView, renderOpsHtml, activeReservation, fmtUsdc, storyStartBlocker } from "./ops.mjs";
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const B = (v) => { try { return BigInt(v ?? 0); } catch { return 0n; } };
@@ -135,6 +135,7 @@ const post = (p, b = {}) => fetch(p, { method: "POST", headers: { "content-type"
 async function refresh() {
   const s = (S = await fetch("/api/state").then((r) => r.json()));
   const st = s.story;
+  const startBlocker = storyStartBlocker(s);
   // Header badge shows chain state; its tooltip identifies the selected backend mode.
   const b = $("backend"); b.textContent = `backend: ${s.chain}`; b.className = `pill ${s.chain}`;
   $("subtitle").textContent = s.chain === "unavailable" ? s.storyBlocker : `Programmable mandates · ${s.chain === "mock" ? "USDC escrow (mock; capture402 on devnet next)" : "USDC escrow on Solana devnet (capture402)"} · human-approved disputes`;
@@ -144,15 +145,15 @@ async function refresh() {
   $("stepNo").textContent = st.step; $("stepTotal").textContent = st.total || 13;
   $("storyFill").style.width = `${st.total ? (st.step / st.total) * 100 : 0}%`;
   $("storyLabel").textContent = st.state === "idle" ? (s.timeline.length ? "Manual actions" : "Ready") : st.label;
-  $("storyCaption").textContent = st.state === "idle" ? (s.timeline.length ? "Results on screen — Reset to replay the story." : "Press “Run demo story” (or →) to start.") : st.caption ?? "";
+  $("storyCaption").textContent = st.state === "idle" ? (s.timeline.length ? (s.chain === "devnet" ? "History retained. A new confirmed story creates new payments." : "Results on screen — Reset to replay the story.") : "Press “Run demo story” (or →) to start.") : st.caption ?? "";
   $("countdown").textContent = st.state === "running" ? (st.paused ? "⏸ paused" : st.nextInMs == null ? "manual — press →" : `next in ${(st.nextInMs / 1000).toFixed(1)} s`)
     : st.state === "awaiting-human" ? "waiting for human" : st.state === "done" ? "✓ done" : "idle";
   $("pause").textContent = st.paused ? "▶ Resume" : "⏸ Pause";
-  $("pause").disabled = st.state !== "running"; $("next").disabled = !!s.storyBlocker || !(st.state === "running" || (st.state === "idle" && !s.timeline.length));
+  $("pause").disabled = st.state !== "running"; $("next").disabled = !!s.storyBlocker || !(st.state === "running" || !startBlocker);
   $("next").textContent = st.state === "idle" ? "Start ▶" : "Next step ▶";
-  $("run").disabled = !!s.storyBlocker || st.state !== "idle" || s.timeline.length > 0;
+  $("run").disabled = !!startBlocker;
   $("run").textContent = s.chain === "devnet" ? "▶ Run devnet story" : "▶ Run demo story";
-  $("run").title = s.storyBlocker ?? ($("run").disabled ? "Results stay on screen — press Reset to replay" : "");
+  $("run").title = startBlocker ?? "";
   $("reset").disabled = s.chain === "devnet" || !!s.storyBlocker;
   const renderIfChanged = (name, data, render) => {
     const signature = JSON.stringify(data);
@@ -160,7 +161,7 @@ async function refresh() {
     cardSignatures.set(name, signature);
     render();
   };
-  const mandate = s.mandates[0] ?? null;
+  const mandate = s.mandates.at(-1) ?? null;
   const reservation = activeReservation(s.ops, mandate?.id);
   renderIfChanged("mandate", { mandate, reservation: reservation.toString() }, () => renderMandate(mandate, s.ops));
   const opsCard = $("opsCard");
@@ -197,7 +198,7 @@ async function start() {
 }
 async function next() {
   if (!S) return;
-  if (S.story.state === "idle") return S.timeline.length ? toast("Results on screen — press Reset to replay") : start();
+  if (S.story.state === "idle") return storyStartBlocker(S) ? toast(storyStartBlocker(S)) : start();
   if (S.story.state === "awaiting-human") return toast("Waiting for the human: Approve (A) or Reject (R)");
   if (S.story.state === "done") return toast("Story complete — results stay until Reset");
   await post("/api/story/next"); refresh();
