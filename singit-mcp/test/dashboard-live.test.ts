@@ -27,7 +27,7 @@ async function stop(child: ChildProcess) {
 async function fixture(chain: "devnet" | "mock" | null, configured = true) {
   const backend = new FaultyBackend(new MockBackend({ balances: { [payer]: 20_000_000n, [merchant]: 20_000_000n } }));
   const service = new PaymentService({ backend, approvalSecret: secret });
-  const upstream = createServer(createHttpHandler({ service, backendName: chain ?? "devnet", approvalSecret: secret, routeSecret: secret }));
+  const upstream = createServer(createHttpHandler({ service, backendName: chain ?? "devnet", approvalSecret: secret, routeSecret: secret, trustedOperator: true }));
   const upstreamPort = await listen(upstream);
   if (chain === null) await close(upstream);
   const reservation = createServer(), port = await listen(reservation);

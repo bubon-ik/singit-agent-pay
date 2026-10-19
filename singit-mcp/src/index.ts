@@ -9,6 +9,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { approvalSecretFromEnv } from "./approval.js";
 import { mockBalancesFromEnv, MockBackend } from "./backend/mock.js";
 import { createHttpHandler } from "./http.js";
+import { listFromEnv, principalConfigFromEnv, stdioPrincipalFromEnv } from "./principal.js";
 import { createMcpServer } from "./server.js";
 import { PaymentService } from "./service.js";
 import { createServiceRuntime, StartupError } from "./runtime.js";
@@ -39,8 +40,13 @@ if (useHttp) {
   const rawRouteSecret = process.env.SINGIT_HUMAN_ROUTE_SECRET;
   const routeSecret = rawRouteSecret && rawRouteSecret.length >= 16 ? rawRouteSecret : undefined;
 
+  const principals = principalConfigFromEnv(process.env, { mock: backendName === "mock" });
   const handler = createHttpHandler({
     service,
+    credentials: principals.credentials,
+    trustedOperator: process.env.SINGIT_MCP_TRUSTED_OPERATOR === "1",
+    allowedHosts: listFromEnv(process.env.SINGIT_MCP_ALLOWED_HOSTS),
+    allowedOrigins: listFromEnv(process.env.SINGIT_MCP_ALLOWED_ORIGINS),
     backendName,
     approvalSecret,
     routeSecret,
@@ -57,7 +63,13 @@ if (useHttp) {
     console.error(`singit-mcp: streamable HTTP on http://${host}:${port}/mcp (health: /health)`);
   });
 } else {
-  const mcpServer = createMcpServer(service);
+  // stdio: the process boundary is the trust boundary; the principal is fixed by SINGIT_MCP_PRINCIPAL.
+  // Unset -> legacy open mode, allowed only with the mock backend.
+  let principal;
+  if (process.env.SINGIT_MCP_PRINCIPAL || backendName !== "mock") {
+    principal = stdioPrincipalFromEnv(process.env, principalConfigFromEnv(process.env, { mock: backendName === "mock" }));
+  }
+  const mcpServer = createMcpServer(service, principal);
   const transport = new StdioServerTransport();
   await mcpServer.connect(transport);
 }

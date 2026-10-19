@@ -10,6 +10,7 @@ import { AmountError, parseUsdc } from "./amount.js";
 import { issueApprovalToken } from "./approval.js";
 import { createRateLimiter } from "./ratelimit.js";
 import { publicOperation } from "./public-state.js";
+import { type AgentCredential, hostnameOf, LOOPBACK_HOSTNAMES, principalFromAuthorization } from "./principal.js";
 import { createMcpServer } from "./server.js";
 import { PaymentService, Refusal } from "./service.js";
 
@@ -29,6 +30,24 @@ export interface HttpHandlerOptions {
   now?: () => number;
   /** Builds a fresh PaymentService for POST /human/reset. Only honored when backendName === "mock". */
   resetService?: () => PaymentService;
+  /**
+   * MVP-01 trusted principals: bearer tokens for the buyer / merchant agents. When non-empty, every
+   * /mcp request must carry a valid `Authorization: Bearer` token and an allowed Host/Origin, and the
+   * principal comes from the token, never from tool input. When empty, /mcp is open ONLY for the
+   * mock backend (local demo); a live backend refuses unauthenticated MCP (401 AUTH_REQUIRED).
+   */
+  credentials?: AgentCredential[];
+  /**
+   * Legacy single-operator mode for a non-mock backend without agent tokens (the demo dashboard
+   * bridge still acts all roles through one MCP client). Explicit opt-in only
+   * (SINGIT_MCP_TRUSTED_OPERATOR=1); the server still binds loopback. Removed once the dashboard
+   * sends per-role tokens.
+   */
+  trustedOperator?: boolean;
+  /** Allowed Host header hostnames for /mcp when credentials are set. Default: loopback only. */
+  allowedHosts?: string[];
+  /** Allowed Origin values (exact, lowercased) for /mcp. Requests without Origin are allowed (non-browser clients). */
+  allowedOrigins?: string[];
 }
 
 /** Recursively converts bigints to strings so the result is JSON.stringify-able. */
@@ -128,7 +147,30 @@ export function createHttpHandler(opts: HttpHandlerOptions): (req: IncomingMessa
       sendRateLimited(res);
       return;
     }
-    const mcpServer = createMcpServer(service);
+    const credentials = opts.credentials ?? [];
+    let principal;
+    if (credentials.length > 0) {
+      const host = hostnameOf(String(req.headers.host ?? ""));
+      if (!(opts.allowedHosts ?? LOOPBACK_HOSTNAMES).includes(host)) {
+        sendJson(res, 403, { ok: false, code: "HOST_NOT_ALLOWED" });
+        return;
+      }
+      const origin = req.headers.origin;
+      if (typeof origin === "string" && !(opts.allowedOrigins ?? []).includes(origin.toLowerCase())) {
+        sendJson(res, 403, { ok: false, code: "ORIGIN_NOT_ALLOWED" });
+        return;
+      }
+      const header = req.headers.authorization;
+      principal = principalFromAuthorization(typeof header === "string" ? header : undefined, credentials);
+      if (!principal) {
+        sendJson(res, 401, { ok: false, code: "AUTH_REQUIRED" }, { "WWW-Authenticate": "Bearer" });
+        return;
+      }
+    } else if (backendName !== "mock" && !opts.trustedOperator) {
+      sendJson(res, 401, { ok: false, code: "AUTH_REQUIRED", reason: "live backend requires SINGIT_BUYER_TOKEN / SINGIT_MERCHANT_TOKEN" });
+      return;
+    }
+    const mcpServer = createMcpServer(service, principal);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => {
       void transport.close();
@@ -247,6 +289,56 @@ export function createHttpHandler(opts: HttpHandlerOptions): (req: IncomingMessa
     sendJson(res, 200, { ok: true, reset: true, audit: service.listAuditLog() });
   }
 
+  /** MVP-01: the human control path for mandate issuance. Guarded by the human route secret, never by an agent token. */
+  async function handleHumanMandate(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!allowMcp(clientKeyOf(req))) {
+      sendRateLimited(res);
+      return;
+    }
+    if (!checkHumanRouteSecret(req, res, routeSecret)) return;
+    let body: Record<string, unknown>;
+    try {
+      const raw = await readBody(req, HUMAN_RESOLVE_BODY_LIMIT);
+      const parsed: unknown = raw ? JSON.parse(raw) : {};
+      if (typeof parsed !== "object" || parsed === null) throw new Error("not an object");
+      body = parsed as Record<string, unknown>;
+    } catch {
+      sendJson(res, 400, { ok: false, code: "INVALID_INPUT", reason: "JSON object body required" });
+      return;
+    }
+    const { payer, totalBudget, perTxCap, expiresAt, allowedCounterparties, note } = body;
+    if (
+      typeof payer !== "string" || typeof totalBudget !== "string" || typeof perTxCap !== "string" ||
+      typeof expiresAt !== "number" || !Array.isArray(allowedCounterparties) ||
+      !allowedCounterparties.every((c) => typeof c === "string") || (note !== undefined && typeof note !== "string")
+    ) {
+      sendJson(res, 400, { ok: false, code: "INVALID_INPUT", reason: "payer, totalBudget, perTxCap (strings), expiresAt (unix s), allowedCounterparties (string[]) required" });
+      return;
+    }
+    try {
+      const mandate = await service.createMandate({
+        actor: payer,
+        payer,
+        totalBudget: parseUsdc(totalBudget),
+        perTxCap: parseUsdc(perTxCap),
+        expiresAt,
+        allowedCounterparties: allowedCounterparties as string[],
+        note: note as string | undefined,
+      });
+      sendJson(res, 200, { ok: true, mandate, remaining: mandate.totalBudget - mandate.committed });
+    } catch (err) {
+      if (err instanceof AmountError) {
+        sendJson(res, 400, { ok: false, code: "INVALID_INPUT", reason: err.message });
+        return;
+      }
+      if (err instanceof Refusal) {
+        sendJson(res, 409, { ok: false, code: err.code, reason: err.message });
+        return;
+      }
+      throw err;
+    }
+  }
+
   return function httpHandler(req: IncomingMessage, res: ServerResponse): void {
     void (async () => {
       try {
@@ -267,6 +359,10 @@ export function createHttpHandler(opts: HttpHandlerOptions): (req: IncomingMessa
         }
         if (method === "POST" && url === "/human/resolve") {
           await handleHumanResolve(req, res);
+          return;
+        }
+        if (method === "POST" && url === "/human/mandate") {
+          await handleHumanMandate(req, res);
           return;
         }
         if (method === "POST" && url === "/human/reset") {
