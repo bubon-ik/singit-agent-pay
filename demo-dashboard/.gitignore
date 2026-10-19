@@ -1,0 +1,6 @@
+node_modules/
+.env
+.env.*
+*.log
+screenshots/*.tmp.png
+# backup/demo.mp4 (~3.5 MB) and backup/demo.gif (~4.6 MB) are under 20 MB, so they are committed on purpose

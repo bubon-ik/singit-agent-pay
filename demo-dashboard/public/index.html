@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SingIt · Agents that pay each other</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <div class="logo">S</div>
+      <div><div class="title">SingIt <span>Agent Payments</span></div>
+        <div id="subtitle" class="sub">Programmable mandates · USDC escrow (mock; capture402 on devnet next) · human-approved disputes</div></div>
+    </div>
+    <div class="actions">
+      <span id="backend" class="pill"></span>
+      <span id="cluster" class="pill"></span>
+      <button id="reset" class="btn ghost">Reset</button>
+      <button id="run" class="btn primary">▶ Run demo story</button>
+    </div>
+  </header>
+
+  <section id="story" class="story">
+    <div class="presenter">
+      <div class="stepno"><span id="stepNo">0</span><small>/<span id="stepTotal">14</span></small></div>
+      <div class="cap"><div id="storyLabel" class="cap-t">Ready</div><div id="storyCaption" class="cap-s">Press “Run demo story” (or →) to start.</div></div>
+      <div class="pctrl">
+        <span id="countdown" class="pill"></span>
+        <select id="pace" class="sel" title="Seconds per step">
+          <option value="7" selected>Presenter · 7 s/step</option>
+          <option value="8.5">Presenter · 8.5 s/step</option>
+          <option value="12">Presenter · 12 s/step</option>
+          <option value="manual">Presenter · manual (Next only)</option>
+          <option value="fast">Fast auto · 1.1 s/step</option>
+        </select>
+        <button id="pause" class="btn ghost" title="P">⏸ Pause</button>
+        <button id="next" class="btn primary" title="→ / Space">Next step ▶</button>
+      </div>
+    </div>
+    <div class="bar"><div id="storyFill"></div></div>
+    <div class="keys"><kbd>→</kbd>/<kbd>Space</kbd> next step · <kbd>P</kbd> pause/resume · <kbd>A</kbd> approve refund · <kbd>R</kbd> reject · <kbd>←</kbd> no rewind (Reset to replay)</div>
+  </section>
+  <div id="toast" class="toast"></div>
+
+  <main class="grid">
+    <section class="card mandate" id="mandateCard"></section>
+    <section class="card dispute" id="disputeCard"></section>
+    <section class="card wide">
+      <div class="card-h"><h2>Escrow holds</h2><span class="hint">hold → capture → release → refund</span></div>
+      <div id="holds"></div>
+    </section>
+    <section class="card timeline-card">
+      <div class="card-h"><h2>Live event stream</h2><span class="hint" id="evCount"></span></div>
+      <ol id="timeline" class="timeline"></ol>
+    </section>
+    <section class="card wide">
+      <div class="card-h"><h2>Audit log</h2><span class="hint">every call, including refusals</span></div>
+      <div class="tablewrap"><table class="audit"><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Ref</th><th>Amount</th><th>Outcome</th><th>Reason</th></tr></thead><tbody id="audit"></tbody></table></div>
+    </section>
+  </main>
+  <footer>Mock backend mirrors capture402 instruction checks (authorize / capture / void / refund). Tx links switch to Solana Explorer (devnet) when the Capture402 backend returns real signatures.</footer>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

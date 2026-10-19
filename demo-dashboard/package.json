@@ -1,0 +1,17 @@
+{
+  "name": "singit-demo-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Demo dashboard for singit-mcp (FinTechers hackathon, Track 2). Zero runtime deps.",
+  "scripts": {
+    "start": "node ../singit-mcp/node_modules/tsx/dist/cli.mjs server.mjs",
+    "start:local": "SINGIT_BACKEND=local node server.mjs",
+    "story": "node scripts/story.mjs",
+    "story:auto": "node scripts/story.mjs --auto-approve",
+    "screenshot": "bash scripts/screenshot.sh",
+    "backup": "xdg-open backup/index.html || open backup/index.html",
+    "test:e2e": "node --test scripts/e2e.test.mjs"
+  },
+  "engines": { "node": ">=20" }
+}
