@@ -1,0 +1,13 @@
+SingIt Agent Pay
+
+This product includes Capture402 ABI helpers from starPaw/capture402-solana,
+commit 236b09a44240d285ee6f33d2e8dac79f81058e3d, under Apache-2.0.
+
+SVM Auth-Capture
+Copyright 2026 SVM Auth-Capture contributors
+
+This product includes software developed by the contributors attributed in its
+Git history. Third-party components retain their own licenses and notices.
+
+Source contributions are attributed to starPaw and nullagent07. Third-party
+contributors retain the attribution and notices distributed with their components.

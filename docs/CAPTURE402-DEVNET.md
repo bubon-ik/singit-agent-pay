@@ -1,0 +1,186 @@
+# Capture402 backend: local implementation and devnet acceptance
+
+This backend is for a **trusted local devnet service with separate throwaway keys**.
+It is implemented and tested offline. No live signing, RPC request, funding,
+deployment, devnet acceptance or full MCP E2E is established by local tests.
+The direct smoke and contract suite require separate explicit owner authorization
+before live execution. Do not run a live MCP service until the PaymentService
+persistence/reservation work below is reviewed and implemented.
+
+## ABI and provenance
+
+Pinned source: [starPaw/capture402-solana @ 236b09a44240d285ee6f33d2e8dac79f81058e3d](https://github.com/starPaw/capture402-solana/tree/236b09a44240d285ee6f33d2e8dac79f81058e3d).
+`src/lib.rs` is normative. `singit-mcp/src/backend/capture402-abi/program.ts`
+reuses the public `integration/src/program.ts` unchanged apart from provenance
+comments. `instructions.ts` extracts the four instruction builders from public
+`integration/src/transactions.ts`, changing only imports. No facilitator,
+operational files, acceptance records or secrets are copied. Apache-2.0 and
+upstream contributor attribution are retained in LICENSE and NOTICE.
+
+`hold` signs authorize with the payer, who is also creation funder and fee payer.
+Capture, void/release and refund are merchant-signed with merchant-paid fees.
+There is no delegate substitution, facilitator or browser wallet flow.
+`createMandate` returns `{}`; mandate policy remains off-chain. Refund transfers
+from the merchant's canonical USDC ATA, never the escrow vault. `held = 0` does
+not prove payment: void/reclaim also set it to zero, and refundable can decrease
+through refunds. Payment history needs original finalized transaction evidence.
+
+## Configuration and independent deployment acceptance
+
+Copy `singit-mcp/.env.example` to a private ignored environment file and fill it
+locally; never paste key material into chat. The program ID is mandatory and
+**not yet confirmed for this integration**. A deployer public key is not a
+program ID. Local `[42;32]` and other source fixture IDs prove no deployment.
+
+Before configuration, the owner must independently approve the devnet deployment
+and the executable built from the pinned source. Supply its program ID,
+ProgramData address, deployment slot and SHA256 of the complete ProgramData
+executable payload **after the 45-byte metadata, including allocation padding**.
+This digest is not necessarily the SHA256 of an unpadded `.so` build artifact.
+Compare source-built executable bytes with the deployed payload and account for
+padding in that external review. A hash copied from an arbitrary RPC account is
+not independent acceptance. The backend checks the upgradeable loader, executable
+flag, Program-to-ProgramData pointer, slot and payload digest on every operation,
+including immediately before a send. Other loader formats are refused.
+An upgrade between this check and execution remains possible: upgrade authority
+and deployment trust must be reviewed separately; this protocol has no atomic
+code-hash pin in its transaction ABI.
+
+Set an explicitly approved HTTPS Helius (`*.helius-rpc.com`, `*.helius.xyz`) or
+QuickNode (`*.quiknode.pro`) RPC URL. The backend enforces Capture402's provider
+policy and checks actual genesis
+`EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG`; hostname is not network proof.
+There is no default or fallback to public RPC, provider switch or resend.
+RPC credentials, including path credentials, are never printed by these tools.
+
+The only mint is Circle devnet USDC
+`4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` (six decimals, classic SPL Token).
+Create and fund **canonical payer and merchant ATAs separately with authorization**.
+The backend does not create these accounts or fund wallets. It creates only the
+payment and its vault through authorize. Capture402's own faucet token is a
+different mint and is refused. Both configured signers must match request and
+payment identities. Key files must live outside Git checkouts.
+
+Payment reads validate owner, discriminator, exact 176-byte size, decoded
+invariants, canonical PDA, mint and all relevant ATAs, including vault backing,
+no native token state, no frozen accounts and no vault delegate/close authority.
+Only a finalized RPC account response of `null` yields `getStatus() === null`.
+Malformed accounts and RPC failures produce distinct errors. Mint is returned
+from the verified decoded payment. Amounts/guards are u64 bigint; deadlines must
+fit the interface's exact safe-integer unix-second representation and obey chain
+Clock boundaries. Application deadline/budget rules still belong to PaymentService.
+
+## Outcomes and PaymentService dependency
+
+The receipt shapes in PaymentBackend are unchanged. The compatible error extension is:
+
+- `BackendError.phase === "validation"`: no transaction was submitted by this
+  invocation. Codes such as `amount`, `unexpected_payment_state`, deadline and
+  insufficient-funds errors describe observed pre-send conditions. Simulation
+  rejection is `simulation_failed`, without inventing a specific on-chain reason.
+- `BackendError.phase === "confirmed_failure"`, code `transaction_failed`: the
+  original signature finalized with `err != null`; details retain signature and
+  actual transaction error. Generic Solana `InvalidArgument` is not guessed to
+  mean a particular Capture402 reason.
+- `BackendOutcomeUnknown` is a separate Error with code `unknown_outcome` and
+  `evidence`: operation, holdId, salt for authorize, amount/guards for mutations,
+  original signature, exact signed wire, blockhash/lifetime, program/network and
+  ABI commit. A lost send response, lost confirmation response, returned signature
+  mismatch or confirmation timeout is UNKNOWN. Missing history is inconclusive.
+
+Success requires the original signature at `finalized` with `err === null`.
+`sendTransaction` uses `maxRetries: 0`. No salt, blockhash or signed message is
+regenerated after a possible send. The backend instance blocks all further writes
+when UNKNOWN and allows read-only observation; `pendingOperation` exposes its
+volatile evidence. There is deliberately no reset/retry method. This volatile
+latch does not survive process recreation and is **not durable retry safety**.
+
+The optional `retainBeforeSend(evidence)` dependency runs before any possible
+submission; a sink failure prevents sending. The two live scripts use exclusive
+mode-600 files with file/directory fsync in `SINGIT_EVIDENCE_DIR`, outside Git.
+`retainFinalized(evidence, err)` saves the original finalized observation before
+releasing the write latch. A new script run refuses an evidence directory with a
+prepared wire lacking a matching finalized receipt. The live contract fixture
+reuses one backend so UNKNOWN blocks subsequent tests. These checks do not
+serialize independent concurrent processes; use isolated sequential runs.
+A prepared file means **possibly sent**, even after a crash. Preserve it forever
+until an independently reviewed reconciliation determines the original outcome.
+Do not rerun a suite, refresh blockhash, generate another salt, switch provider,
+remove evidence, or automatically void/refund to compensate for UNKNOWN.
+
+**PaymentService remains a blocker for safe live MCP use:** it has no durable
+operation journal or mandate reservation before authorize, serial concurrency
+control, restart recovery or reconciliation. Its existing `toRefusal` only maps
+BackendError; the new UNKNOWN type must be handled explicitly by service/MCP
+callers, persisted with original identity/wire, and exposed as a distinct pending
+outcome rather than a blocked payment or retry suggestion. Preserve reservations
+across UNKNOWN and failed post-send status reads. Hold's current wrong-mint
+cleanup/budget-restoration path must not release a reservation without proven
+finalized effects. Dispute resolution's multi-step void/refund also needs separate
+durable steps. Do not claim these are fixed by this backend implementation.
+
+## Local checks
+
+From `singit-mcp/`:
+
+```sh
+npm ci
+npm run typecheck
+npm test
+npm run devnet:smoke  # clean env: checklist, exit 1, no network/signing/send
+```
+
+The offline signed-RPC fixture runs the existing shared backend contract including
+controlled deadlines and wrong mint. Additional tests exercise wire/account roles,
+bigints, invalid network/deployment/mint/signers/accounts, funding checks, confirmed
+failure versus lost responses, and no new operation after UNKNOWN. This is
+synthetic evidence, not devnet execution. Upstream `sac001/002/003` tests execute
+the source-built SBF in LiteSVM; their results are separate from backend RPC tests.
+
+## Authorized devnet commands
+
+After deployment/provider/keys, private evidence directory and funding have been
+reviewed and separately authorized, load the private environment locally. From
+`singit-mcp/`:
+
+```sh
+set -a
+. ./.env.local
+set +a
+# Direct backend: hold 1 -> capture 0.6 -> release 0.4 -> refund 0.2 USDC.
+npm run devnet:smoke
+# Separate approval for the suite's additional economic actions; do not rerun after UNKNOWN.
+SINGIT_CONTRACT_DEVNET=1 npx vitest run test/backend-contract.capture402.test.ts
+```
+
+The smoke records intent/salt before authorize, exact signed wires before every
+send, finalized receipts and decoded states/balances after every successful step.
+It checks payer/merchant USDC deltas as well as H/F, stale release/refund guards
+and duplicate release, stopping without cleanup on any discrepancy. Explorer
+links use `?cluster=devnet`. A direct smoke is not an MCP end-to-end acceptance.
+
+The devnet suite executes seven holds at default unit `100000n` (0.1 USDC), four
+captures, two voids and one refund. It includes one in-process PaymentService
+scenario (not a remote MCP transport). **Its deadline-expiry and wrong-mint tests
+are skipped** because the live fixture has neither a controllable Clock nor a
+wrong-mint fixture. Wrong-network, corrupt-account, lost-response and deployment
+fault injection are local tests only. No live induced UNKNOWN is authorized.
+
+Conservative planning for **both** scripts once, in isolated wallets:
+
+| Resource | Planned requirement (not a funding action) |
+|---|---|
+| Payer USDC | Gross authorizations: 1 + 7 × 0.1 = **1.7 USDC**; recommend at least 2 USDC before both scripts, more for extra runs |
+| Merchant USDC | Must retain liquidity for 0.2 smoke refund + 0.02 suite refund; preceding captures supply this if no concurrent spending; pre-seed a separate buffer if needed |
+| New payment/vault pairs | 8 pairs; payment identity/rent and vault remain allocated; no close instruction |
+| Payer SOL | 8 authorize fees + 8 × quoted payment/vault rent; roughly 0.0333 SOL at 5000 lamports/signature and ordinary rent; use at least 0.05 SOL plus separate ATA setup |
+| Merchant SOL | 10 submitted operation fees total; roughly 0.00005 SOL at the same fee assumption; keep 0.01 SOL buffer |
+| Existing ATAs | Creation rent/fees for payer and merchant are additional if absent; no automatic provisioning |
+
+Actual fee quotes and rent are fetched before each send; these estimates are not
+RPC measurements. Suite tests leave some escrow held (about 0.34 USDC at default
+unit); expiry alone returns nothing. Any later explicit release/reclaim is a
+separate authorized action. A failed/UNKNOWN run may leave more funds reserved.
+Final acceptance still requires verified deployment identity, funded isolated
+wallets, the authorized devnet runs, independent review and a separate full MCP
+E2E after PaymentService's journal/reservation fixes.

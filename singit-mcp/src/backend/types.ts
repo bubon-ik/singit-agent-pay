@@ -50,7 +50,7 @@ export interface HoldRequest {
 export interface HoldReceipt {
   /** capture402: the payment PDA address. Used as the id for every later call. */
   holdId: string;
-  /** Mock ref (mock-tx-N) until Capture402Backend is wired to devnet; then the devnet tx signature. Goes into the audit log (the program emits no logs, QA L-2). */
+  /** Mock ref for MockBackend; finalized devnet transaction signature for Capture402Backend. Goes into the audit log (the program emits no logs, QA L-2). */
   txSig: string;
 }
 
@@ -83,7 +83,7 @@ export interface RefundRequest extends StateGuard {
 }
 
 export interface TxReceipt {
-  /** Mock ref (mock-tx-N) until Capture402Backend is wired to devnet; then the devnet tx signature. */
+  /** Mock ref for MockBackend; finalized devnet transaction signature for Capture402Backend. */
   txSig: string;
 }
 
@@ -123,8 +123,38 @@ export class BackendError extends Error {
   constructor(
     public readonly code: string,
     message: string,
+    public readonly phase: "validation" | "confirmed_failure" = "validation",
+    public readonly details?: { signature: string; transactionError: unknown },
   ) {
     super(message);
     this.name = "BackendError";
+  }
+}
+
+/** Public reconciliation data; retain privately before reporting UNKNOWN. No secret key material. */
+export interface UnknownOperation {
+  readonly operation: "hold" | "capture" | "release" | "refund";
+  readonly holdId: string;
+  readonly salt?: string;
+  readonly amount?: string;
+  readonly expectedHeld?: string;
+  readonly expectedRefundable?: string;
+  readonly signature: string;
+  readonly signedTransaction: string;
+  readonly blockhash: string;
+  readonly lastValidBlockHeight: string;
+  readonly programId: string;
+  readonly genesisHash: string;
+  readonly abiCommit: string;
+}
+
+/** A possible send is not a proven failure. Intentionally separate from BackendError. */
+export class BackendOutcomeUnknown extends Error {
+  readonly code = "unknown_outcome";
+  constructor(public readonly evidence: UnknownOperation) {
+    super(
+      "Transaction outcome UNKNOWN; retain original evidence and reservation, reconcile without retry",
+    );
+    this.name = "BackendOutcomeUnknown";
   }
 }
