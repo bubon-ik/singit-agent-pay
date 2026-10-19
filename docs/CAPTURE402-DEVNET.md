@@ -42,6 +42,8 @@ SINGIT_PROGRAM_ID=992QmwmwCebawRJsTCgvc8qnzGivbFaD39ZQE7VhHp7o
 SINGIT_PROGRAM_DATA=HTKbRudHxuqgQvqpfrUM59ZohVfbx81Yu8Bdyp897doM
 SINGIT_DEPLOYMENT_SLOT=508146249
 SINGIT_EXECUTABLE_SHA256=adee4e8f51fbc52b046c4d5a846c63ecdb63d392b1d16b559d3f6c2984b27415
+# Also pin the accepted upgrade authority (or none) before using the merchant devnet profile.
+# SINGIT_UPGRADE_AUTHORITY=
 ```
 
 Provenance: `992Qmwmw…` also appears as a test fixture in capture402-solana

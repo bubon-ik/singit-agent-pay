@@ -36,6 +36,9 @@ export function buildBackendFromEnv(
         deploymentSlot: /^\d+$/.test(env.SINGIT_DEPLOYMENT_SLOT ?? "")
           ? BigInt(env.SINGIT_DEPLOYMENT_SLOT!)
           : -1n,
+        ...(env.SINGIT_UPGRADE_AUTHORITY === undefined ? {} : {
+          upgradeAuthority: env.SINGIT_UPGRADE_AUTHORITY === 'none' ? null : env.SINGIT_UPGRADE_AUTHORITY,
+        }),
       },
       dependencies,
     );

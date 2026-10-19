@@ -109,6 +109,8 @@ export interface Capture402Config {
   /** SHA256 of the entire ProgramData executable payload after its 45-byte metadata (incl. padding). */
   executableSha256: string;
   deploymentSlot: bigint;
+  /** Optional no-upgrade window pin; null means immutable. Required by the merchant profile. */
+  upgradeAuthority?: string | null;
   confirmationTimeoutMs?: number;
   /** Space RPC starts within this backend instance; independent of provider quotas. */
   rpcMinIntervalMs?: number;
@@ -252,6 +254,7 @@ export class Capture402Backend implements PaymentBackend {
     assertDevnetRpc(config.rpcUrl);
     this.program = key(config.programId);
     this.programData = key(config.programDataAddress);
+    if (config.upgradeAuthority !== undefined && config.upgradeAuthority !== null) key(config.upgradeAuthority);
     if (config.mint !== DEVNET_USDC_MINT)
       throw new BackendError(
         "wrong_mint",
@@ -294,6 +297,18 @@ export class Capture402Backend implements PaymentBackend {
   /** Volatile reconciliation evidence only; durable reservations/journal belong to PaymentService. */
   get pendingOperation(): UnknownOperation | undefined {
     return this.uncertain;
+  }
+
+  /** Non-secret identity attestation for local clients, available only with an authority pin. */
+  deploymentProfile(payer: string, merchant: string) {
+    if (this.config.upgradeAuthority === undefined) return undefined;
+    key(payer); key(merchant);
+    if (payer === merchant) throw new BackendError('invalid_terms', 'Distinct demo identities required');
+    return Object.freeze({ schema: 1, name: 'devnet', network: `solana:${DEVNET_GENESIS_HASH.slice(0, 32)}`,
+      genesisHash: DEVNET_GENESIS_HASH, programId: this.program, programDataAddress: this.programData,
+      executableSha256: this.config.executableSha256, deploymentSlot: this.config.deploymentSlot.toString(),
+      upgradeAuthority: this.config.upgradeAuthority, abiCommit: CAPTURE402_ABI_COMMIT,
+      mint: DEVNET_USDC_MINT, tokenProgram: TOKEN_PROGRAM_ADDRESS, payer, merchant });
   }
 
   async createMandate(_terms: MandateTerms): Promise<{ ref?: string }> {
@@ -445,6 +460,12 @@ export class Capture402Backend implements PaymentBackend {
       throw new BackendError(
         "invalid_deployment",
         "ProgramData slot/executable digest differs from reviewed deployment",
+      );
+    }
+    if (this.config.upgradeAuthority !== undefined) {
+      const actual = data.data[12] === 0 ? null : getAddressDecoder().decode(data.data.subarray(13, 45));
+      if (actual !== this.config.upgradeAuthority) throw new BackendError(
+        'invalid_deployment', 'ProgramData upgrade authority differs from the verification-window pin',
       );
     }
     for (const id of [

@@ -27,7 +27,7 @@ try {
   console.error(error instanceof StartupError ? `${error.code}: ${error.message}` : "MCP startup failed; review private configuration and journal locally");
   process.exit(1);
 }
-const { service, backendName, close } = runtime;
+const { service, backendName, close, profile } = runtime;
 process.once("exit", close);
 process.once("SIGINT", () => process.exit(130));
 process.once("SIGTERM", () => process.exit(143));
@@ -48,6 +48,7 @@ if (useHttp) {
     allowedHosts: listFromEnv(process.env.SINGIT_MCP_ALLOWED_HOSTS),
     allowedOrigins: listFromEnv(process.env.SINGIT_MCP_ALLOWED_ORIGINS),
     backendName,
+    paymentProfile: profile,
     approvalSecret,
     routeSecret,
     mcpPerMin: Number(process.env.SINGIT_RATE_LIMIT_PER_MIN ?? 120),

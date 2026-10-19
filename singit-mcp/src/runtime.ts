@@ -114,7 +114,7 @@ function namespaceLock(env: NodeJS.ProcessEnv): () => void {
 export async function createServiceRuntime(
   env: NodeJS.ProcessEnv,
   options: { backend?: PaymentBackend; approvalSecret?: string; now?: () => number } = {},
-): Promise<{ service: PaymentService; backendName: "devnet" | "mock"; close: () => void }> {
+): Promise<{ service: PaymentService; backendName: "devnet" | "mock"; close: () => void; profile?: Readonly<Record<string, unknown>> }> {
   const live = env.SINGIT_BACKEND === "capture402";
   if (!live && env.SINGIT_STATE_DIR) {
     throw new StartupError("MOCK_STATE_NOT_DURABLE", "SINGIT_STATE_DIR is for capture402; the mock ledger is in memory and cannot be restored from an operation journal alone");
@@ -170,7 +170,9 @@ export async function createServiceRuntime(
         }
       });
     };
-    return { service, backendName: live ? "devnet" : "mock", close };
+    const profile = live && backend instanceof Capture402Backend
+      ? backend.deploymentProfile(env.SINGIT_PAYER_ADDRESS ?? '', env.SINGIT_MERCHANT_ADDRESS ?? '') : undefined;
+    return { service, backendName: live ? "devnet" : "mock", close, profile };
   } catch (error) {
     closeAll();
     if (error instanceof JournalError) throw new StartupError(error.code, error.message);
