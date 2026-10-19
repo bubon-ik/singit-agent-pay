@@ -1,0 +1,17 @@
+# systemd USER unit (no sudo). Install: ~/.config/systemd/user/singit-demo-dashboard.service
+[Unit]
+Description=SingIt hackathon demo dashboard (devnet only)
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/apps/hackathon/demo-dashboard
+EnvironmentFile=%h/apps/hackathon/hackathon.env
+Environment=PORT=15173
+ExecStart=/usr/bin/env npm start
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+MemoryMax=300M
+
+[Install]
+WantedBy=default.target

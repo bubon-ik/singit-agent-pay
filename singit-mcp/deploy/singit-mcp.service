@@ -1,0 +1,18 @@
+# systemd USER unit (no sudo). Install: ~/.config/systemd/user/singit-mcp.service
+[Unit]
+Description=SingIt hackathon MCP server (devnet only, streamable HTTP)
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/apps/hackathon/singit-mcp
+EnvironmentFile=%h/apps/hackathon/hackathon.env
+Environment=SINGIT_MCP_HTTP=1
+Environment=PORT=18787
+ExecStart=/usr/bin/env npx tsx src/index.ts --http
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+MemoryMax=300M
+
+[Install]
+WantedBy=default.target

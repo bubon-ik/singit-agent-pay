@@ -18,7 +18,8 @@
     "start:http": "tsx src/index.ts --http",
     "test": "vitest run",
     "demo": "tsx scripts/demo.ts",
-    "approve": "tsx scripts/approve.ts"
+    "approve": "tsx scripts/approve.ts",
+    "demo:all": "bash scripts/demo-all.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
