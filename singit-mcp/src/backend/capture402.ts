@@ -1,7 +1,7 @@
 /**
  * Devnet PaymentBackend backed by the capture402 program. Stub: every method throws until
  * the on-chain wiring is filled in. See INTERFACE.md for the instruction/account tables and
- * /tmp/capture402-solana (integration/src/transactions.ts, program.ts) for the TS helpers.
+ * the capture402-solana repo (integration/src/transactions.ts, program.ts) for the TS helpers.
  *
  * Devnet only. Keys: devnet throwaway keypairs generated locally by the team, loaded from env
  * (SINGIT_PAYER_KEYPAIR / SINGIT_MERCHANT_KEYPAIR), never committed; agents never see keys.
