@@ -7,25 +7,13 @@
 import { createServer } from "node:http";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { approvalSecretFromEnv } from "./approval.js";
-import { Capture402Backend } from "./backend/capture402.js";
+import { buildBackendFromEnv } from "./backend/factory.js";
 import { mockBalancesFromEnv, MockBackend } from "./backend/mock.js";
-import { DEVNET_USDC_MINT, type PaymentBackend } from "./backend/types.js";
 import { createHttpHandler } from "./http.js";
 import { createMcpServer } from "./server.js";
 import { PaymentService } from "./service.js";
 
-function buildBackend(): PaymentBackend {
-  if (process.env.SINGIT_BACKEND === "capture402") {
-    return new Capture402Backend({
-      rpcUrl: process.env.SINGIT_RPC_URL ?? "https://api.devnet.solana.com",
-      programId: process.env.SINGIT_PROGRAM_ID ?? "",
-      mint: DEVNET_USDC_MINT,
-    });
-  }
-  return new MockBackend({ balances: mockBalancesFromEnv(process.env) });
-}
-
-const backend = buildBackend();
+const backend = buildBackendFromEnv(process.env);
 const approvalSecret = approvalSecretFromEnv();
 if (!approvalSecret) {
   console.error("WARNING: SINGIT_HUMAN_APPROVAL_SECRET is unset or shorter than 16 chars; resolve_dispute will refuse every call.");
