@@ -117,7 +117,7 @@ export function createHttpHandler(opts: HttpHandlerOptions): (req: IncomingMessa
     sendJson(
       res,
       200,
-      { v: 1, backend: backendName, mandates, disputes: service.listDisputes(), audit: service.listAuditLog(), holds },
+      { v: 1, backend: backendName, mandates, disputes: service.listDisputes(), audit: service.listAuditLog(), holds, ops: service.listOperations() },
       { "Access-Control-Allow-Origin": "*" },
     );
   }

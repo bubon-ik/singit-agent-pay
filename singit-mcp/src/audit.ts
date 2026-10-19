@@ -29,6 +29,9 @@ export const RefusalCodes = [
   "DISPUTE_ALREADY_RESOLVED",
   "HUMAN_APPROVAL_REQUIRED", // QA H-1: missing/invalid human token, or approval not configured
   "BACKEND_ERROR",
+  "OPERATION_UNKNOWN", // a money-moving backend call was ambiguous (lost response/timeout); pending reconcile
+  "OPERATION_PENDING", // another op on this hold is still pending/unknown; refused before any backend call
+  "IDEMPOTENCY_KEY_REUSED", // same scoped idempotency key, different request params
 ] as const;
 export type RefusalCode = (typeof RefusalCodes)[number];
 
@@ -41,7 +44,11 @@ export type AuditAction =
   | "open_dispute"
   | "resolve_dispute"
   // "reset" is the only action that is not an MCP tool: HTTP POST /human/reset only (mock backend).
-  | "reset";
+  | "reset"
+  // one row per operation state transition during reconcile(); not an MCP tool call itself.
+  | "reconcile"
+  // BackendOutcomeUnknown / lost response: reservation kept. Dashboard matches case-insensitively.
+  | "OUTCOME_UNKNOWN";
 
 export const AUDIT_SCHEMA_VERSION = 1 as const;
 

@@ -14,6 +14,9 @@ import {
   type PaymentBackend,
   type RefundRequest,
   type ReleaseRequest,
+  type SubmitContext,
+  type TxOutcome,
+  type TxOutcomeQuery,
   type TxReceipt,
 } from "./types.js";
 
@@ -52,12 +55,21 @@ export function mockBalancesFromEnv(env: NodeJS.ProcessEnv): Record<string, bigi
   return Object.fromEntries(Object.entries(JSON.parse(raw) as Record<string, string>).map(([addr, v]) => [addr, BigInt(v)]));
 }
 
+/** A txSig this backend issued, remembered so getTxOutcome can answer without any real chain. */
+interface TxSigRecord {
+  kind: "hold" | "capture" | "release" | "refund";
+  holdId: string;
+  executed: boolean;
+}
+
 export class MockBackend implements PaymentBackend {
   readonly name = "mock";
 
   private readonly now: () => number;
   private readonly balances: Map<string, bigint>;
   private readonly payments = new Map<string, HeldPayment>();
+  /** Every txSig this backend has handed out via onPrepared, prepared or executed (QA: reconcile support). */
+  private readonly txSigs = new Map<string, TxSigRecord>();
   private holdSeq = 0;
   private txSeq = 0;
 
@@ -103,7 +115,7 @@ export class MockBackend implements PaymentBackend {
     return {};
   }
 
-  async hold(req: HoldRequest): Promise<HoldReceipt> {
+  async hold(req: HoldRequest, ctx?: SubmitContext): Promise<HoldReceipt> {
     if (req.payer === req.payee) {
       throw new BackendError("accounts", "payer and server must be distinct accounts");
     }
@@ -122,6 +134,10 @@ export class MockBackend implements PaymentBackend {
     }
 
     const holdId = `mock-hold-${++this.holdSeq}`;
+    const txSig = this.nextTxSig();
+    this.txSigs.set(txSig, { kind: "hold", holdId, executed: false });
+    if (ctx?.onPrepared) await ctx.onPrepared({ txSig, holdId });
+
     this.debit(req.payer, req.maximum);
     this.payments.set(holdId, {
       payer: req.payer,
@@ -133,10 +149,11 @@ export class MockBackend implements PaymentBackend {
       captureDeadline: req.captureDeadline,
       refundDeadline: req.refundDeadline,
     });
-    return { holdId, txSig: this.nextTxSig() };
+    this.txSigs.get(txSig)!.executed = true;
+    return { holdId, txSig };
   }
 
-  async capture(req: CaptureRequest): Promise<TxReceipt> {
+  async capture(req: CaptureRequest, ctx?: SubmitContext): Promise<TxReceipt> {
     const payment = this.find(req.holdId);
     this.require(payment, req.expectedHeld, req.expectedRefundable);
     if (payment.held === 0n) {
@@ -149,6 +166,10 @@ export class MockBackend implements PaymentBackend {
       throw new BackendError("amount", `capture amount ${req.amount} out of bounds for held ${payment.held}`);
     }
 
+    const txSig = this.nextTxSig();
+    this.txSigs.set(txSig, { kind: "capture", holdId: req.holdId, executed: false });
+    if (ctx?.onPrepared) await ctx.onPrepared({ txSig });
+
     payment.held -= req.amount;
     payment.refundable += req.amount;
     this.credit(payment.payee, req.amount);
@@ -156,21 +177,28 @@ export class MockBackend implements PaymentBackend {
       this.credit(payment.payer, payment.held);
       payment.held = 0n;
     }
-    return { txSig: this.nextTxSig() };
+    this.txSigs.get(txSig)!.executed = true;
+    return { txSig };
   }
 
-  async release(req: ReleaseRequest): Promise<TxReceipt> {
+  async release(req: ReleaseRequest, ctx?: SubmitContext): Promise<TxReceipt> {
     const payment = this.find(req.holdId);
     this.require(payment, req.expectedHeld, req.expectedRefundable);
     if (payment.held === 0n) {
       throw new BackendError("empty_hold", `nothing held on ${req.holdId}`);
     }
+
+    const txSig = this.nextTxSig();
+    this.txSigs.set(txSig, { kind: "release", holdId: req.holdId, executed: false });
+    if (ctx?.onPrepared) await ctx.onPrepared({ txSig });
+
     this.credit(payment.payer, payment.held);
     payment.held = 0n;
-    return { txSig: this.nextTxSig() };
+    this.txSigs.get(txSig)!.executed = true;
+    return { txSig };
   }
 
-  async refund(req: RefundRequest): Promise<TxReceipt> {
+  async refund(req: RefundRequest, ctx?: SubmitContext): Promise<TxReceipt> {
     const payment = this.find(req.holdId);
     this.require(payment, req.expectedHeld, req.expectedRefundable);
     if (this.now() >= payment.refundDeadline) {
@@ -183,10 +211,15 @@ export class MockBackend implements PaymentBackend {
       throw new BackendError("server_insufficient_funds", `merchant ${payment.payee} has insufficient balance to refund ${req.amount}`);
     }
 
+    const txSig = this.nextTxSig();
+    this.txSigs.set(txSig, { kind: "refund", holdId: req.holdId, executed: false });
+    if (ctx?.onPrepared) await ctx.onPrepared({ txSig });
+
     this.debit(payment.payee, req.amount);
     this.credit(payment.payer, req.amount);
     payment.refundable -= req.amount;
-    return { txSig: this.nextTxSig() };
+    this.txSigs.get(txSig)!.executed = true;
+    return { txSig };
   }
 
   async getStatus(holdId: string): Promise<EscrowStatus | null> {
@@ -203,5 +236,37 @@ export class MockBackend implements PaymentBackend {
       captureDeadline: payment.captureDeadline,
       refundDeadline: payment.refundDeadline,
     };
+  }
+
+  /**
+   * Mock has no in-flight/async layer: a remembered txSig is either executed (mutated balances)
+   * or merely prepared (onPrepared ran, then the call never completed, e.g. a faulty wrapper
+   * threw after onPrepared) -- the latter and any unknown signature are indistinguishable from
+   * "this never landed", i.e. not_found.
+   */
+  async getTxOutcome(q: TxOutcomeQuery): Promise<TxOutcome> {
+    if (q.txSig) {
+      const rec = this.txSigs.get(q.txSig);
+      if (!rec || !rec.executed) return { status: "not_found" };
+      return { status: "executed", txSig: q.txSig, holdId: rec.holdId };
+    }
+    if (q.kind === "hold" && q.holdId && this.payments.has(q.holdId)) {
+      return { status: "executed", txSig: null, holdId: q.holdId };
+    }
+    return { status: "not_found" };
+  }
+
+  /** Read-only snapshot of on-chain payments, for test assertions (e.g. "budget never exceeds
+   * totalBudget minus real on-chain holds/captures"). Not part of the PaymentBackend contract. */
+  listPayments(): Array<{ holdId: string; payer: string; payee: string; mint: string; maximum: bigint; held: bigint; refundable: bigint }> {
+    return [...this.payments.entries()].map(([holdId, p]) => ({
+      holdId,
+      payer: p.payer,
+      payee: p.payee,
+      mint: p.mint,
+      maximum: p.maximum,
+      held: p.held,
+      refundable: p.refundable,
+    }));
   }
 }
