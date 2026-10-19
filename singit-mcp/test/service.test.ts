@@ -440,6 +440,16 @@ test("reject outcome resolves the dispute and sends no tx (QA H-1)", async () =>
   expect(resolved.txSigs.length).toBe(0);
 });
 
+test("create_mandate audit entry includes amount = totalBudget", async () => {
+  const { service, now } = setup();
+  const mandate = await createMandate(service, { totalBudget: 1_000_000n, expiresAt: now() + 1000 });
+
+  const entries = service.listAuditLog({ mandateId: mandate.id });
+  const createEntry = entries.find((e) => e.action === "create_mandate" && e.outcome === "ok");
+  expect(createEntry).toBeDefined();
+  expect(createEntry?.amount).toBe("1000000");
+});
+
 test("audit log entries are schema-complete and tx-stamped for money ops", async () => {
   const { service, now } = setup();
   const mandate = await createMandate(service, { expiresAt: now() + 1000 });

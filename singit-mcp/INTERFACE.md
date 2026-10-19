@@ -73,6 +73,8 @@ Schema: `AuditEntry` in [`src/audit.ts`](src/audit.ts). Fields are only ever add
   mandateId, holdId, disputeId, amount /*base units string*/, txSig, held, refundable /*escrow state after*/ }
 ```
 
+`amount` is the base-unit amount of the action: `totalBudget` for `create_mandate`, the held/captured/released/refunded amount for the escrow actions, the refund for an approved `resolve_dispute`; `null` where there is no amount (e.g. `open_dispute`, a rejected dispute).
+
 **On-chain rules (mirrored by MockBackend):**
 - `authorize`: `maximum > 0`, `now < captureDeadline <= refundDeadline`, payer ≠ server. The full maximum moves into the vault (`held = maximum`, `refundable = 0`).
 - `capture`: `now < captureDeadline`, `0 < amount <= held`. Then `held -= amount` (or `held = 0` with releaseRemainder, the rest goes to the payer) and `refundable += amount`.
