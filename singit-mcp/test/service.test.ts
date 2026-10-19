@@ -150,6 +150,36 @@ test("backend reporting a different mint on getStatus -> WRONG_MINT and funds re
   expect(last.held).toBe("0"); // release succeeded: nothing left held
 });
 
+test("hold: backend reports a non-devnet-USDC mint on getStatus -> WRONG_MINT, hold not active, budget restored, remainder released", async () => {
+  let t = 1_800_000_000;
+  const now = () => t;
+  const inner = new MockBackend({ now, balances: { [PAYER]: 1_000_000_000n, [PAYEE]: 0n } });
+  const releaseSpy = vi.spyOn(inner, "release");
+  const backend = new WrongMintBackend(inner);
+  const service = new PaymentService({ backend, now, approvalSecret: SECRET });
+  const mandate = await createMandate(service, { expiresAt: now() + 1000 });
+  const before = service.getMandate(mandate.id);
+
+  await expectRefused(
+    service.hold({ actor: PAYER, mandateId: mandate.id, payee: PAYEE, amount: 500_000n }),
+    "WRONG_MINT",
+  );
+
+  const after = service.getMandate(mandate.id);
+  expect(after.mandate.committed).toBe(before.mandate.committed);
+  expect(after.remaining).toBe(before.remaining);
+
+  const entries = service.listAuditLog({ mandateId: mandate.id });
+  const last = entries[entries.length - 1];
+  expect(last.code).toBe("WRONG_MINT");
+  const holdId = last.holdId as string;
+  expect(holdId).toBeTruthy();
+  expect(() => service.getHold(holdId)).toThrow();
+
+  expect(releaseSpy).toHaveBeenCalledTimes(1);
+  expect(releaseSpy).toHaveBeenCalledWith(expect.objectContaining({ holdId, expectedHeld: 500_000n, expectedRefundable: 0n }));
+});
+
 test("captureDeadline in milliseconds -> INVALID_DEADLINE (QA M-3)", async () => {
   const { service, now } = setup();
   const mandate = await createMandate(service, { expiresAt: now() + 30 * 86400 });
