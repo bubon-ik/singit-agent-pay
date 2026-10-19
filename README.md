@@ -2,7 +2,7 @@
 
 **Agents that pay each other, safely:** an MCP server that lets AI agents hold, capture, release and refund USDC under human-set mandates (budget, per-tx cap, allowed payees, deadlines), with disputes only a human can resolve and a full audit log.
 
-> **Status:** the demo runs on the **mock backend** (in-memory, synthetic data, no keys). The Solana devnet backend (`Capture402Backend`, on the capture402 escrow program) is being implemented by a teammate; switching `SINGIT_BACKEND=capture402` will be the only change. Devnet only, never mainnet.
+> **Status:** the demo runs on the **mock backend** (in-memory, synthetic data, no keys). The Solana devnet backend (`Capture402Backend`) is implemented and tested locally against the pinned public ABI. [Devnet acceptance](docs/CAPTURE402-DEVNET.md) still requires a verified deployment, explicit provider/keys/funding and separate authorization; PaymentService persistence remains a live MCP blocker. Devnet only, never mainnet.
 
 ## Quickstart
 
@@ -83,7 +83,7 @@ Full schemas, refusal codes and the backend contract: [docs/INTERFACE.md](docs/I
 
 | Path | What |
 |---|---|
-| `singit-mcp/` | The MCP server: mandate engine, `PaymentBackend` (mock + capture402 stub), human approval, audit log, tests |
+| `singit-mcp/` | The MCP server: mandate engine, `PaymentBackend` (mock + Capture402 devnet implementation), human approval, audit log, tests |
 | `demo-dashboard/` | Zero-dependency web dashboard that plays the demo story against singit-mcp |
 | `docs/` | Architecture, interface, demo story |
 
@@ -106,7 +106,7 @@ FinTechers Prague, Track 2 "Agents that pay each other", 19–20 Oct 2026. Every
 
 ## Safety
 
-Solana devnet and devnet USDC only. Keys are devnet throwaway keypairs loaded from file paths in env (`SINGIT_PAYER_KEYPAIR`, `SINGIT_MERCHANT_KEYPAIR`), never committed; agents never see keys. `txSig` values are mock refs (`mock-tx-N`) until the devnet backend is wired.
+Solana devnet and devnet USDC only. Keys are devnet throwaway keypairs loaded from file paths in env (`SINGIT_PAYER_KEYPAIR`, `SINGIT_MERCHANT_KEYPAIR`), never committed; agents never see keys. `txSig` values are mock refs (`mock-tx-N`) on mock and finalized devnet signatures on Capture402. UNKNOWN is a separate pending outcome, never payment proof.
 
 ## License
 
