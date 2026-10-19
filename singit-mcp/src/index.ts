@@ -5,6 +5,7 @@
  * stateless streamable-HTTP server on node:http, sharing one PaymentService across requests.
  */
 import { createServer } from "node:http";
+import { createRateLimiter } from "./ratelimit.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -41,14 +42,20 @@ const service = new PaymentService({ backend, approvalSecret });
 const useHttp = process.argv.includes("--http") || process.env.SINGIT_MCP_HTTP === "1";
 
 if (useHttp) {
-  const host = "127.0.0.1";
+  const host = "127.0.0.1"; // always loopback; expose publicly only via a tunnel/reverse proxy
   const port = Number(process.env.PORT ?? 8787);
+  const allow = createRateLimiter(Number(process.env.SINGIT_RATE_LIMIT_PER_MIN ?? 120));
 
   const httpServer = createServer((req, res) => {
     void (async () => {
       try {
         if (req.method === "GET" && req.url === "/health") {
           res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
+          return;
+        }
+        const client = String(req.headers["cf-connecting-ip"] ?? req.socket.remoteAddress ?? "unknown");
+        if (!allow(client)) {
+          res.writeHead(429, { "Content-Type": "application/json", "Retry-After": "60" }).end(JSON.stringify({ ok: false, error: "rate limited" }));
           return;
         }
         if (req.url !== "/mcp") {
