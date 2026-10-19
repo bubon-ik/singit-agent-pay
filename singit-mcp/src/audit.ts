@@ -38,7 +38,9 @@ export type AuditAction =
   | "release"
   | "refund"
   | "open_dispute"
-  | "resolve_dispute";
+  | "resolve_dispute"
+  // "reset" is the only action that is not an MCP tool: HTTP POST /human/reset only (mock backend).
+  | "reset";
 
 export const AUDIT_SCHEMA_VERSION = 1 as const;
 

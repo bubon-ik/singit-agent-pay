@@ -246,6 +246,11 @@ export class PaymentService {
     return entries.slice();
   }
 
+  /** Records that this (freshly constructed) service replaced the prior mock-backend state. HTTP /human/reset only. */
+  recordReset(actor: string): void {
+    this.record("reset", actor, "ok", null, "state reset to defaults (mock backend)", {});
+  }
+
   // ---- writes (exactly one audit entry each) ----
 
   async createMandate(args: CreateMandateArgs): Promise<Mandate> {

@@ -31,8 +31,24 @@ interface HeldPayment {
 export interface MockBackendOptions {
   /** Unix seconds. Defaults to the real clock. */
   now?: () => number;
-  /** Synthetic token balances per address, by base units. */
+  /** Synthetic token balances per address, by base units. Defaults to a copy of DEFAULT_MOCK_BALANCES. */
   balances?: Record<string, bigint>;
+}
+
+/** Starting balances for the mock backend when no explicit/env override is given. */
+export const DEFAULT_MOCK_BALANCES: Record<string, bigint> = {
+  "buyer-agent": 100_000_000n,
+  "seller-agent": 20_000_000n,
+  "agent:research-bot": 100_000_000n,
+  "data-vendor": 20_000_000n,
+  "gpu-broker": 20_000_000n,
+};
+
+/** Parses SINGIT_MOCK_BALANCES (JSON {"addr":"baseUnits"}) if set, else returns a copy of DEFAULT_MOCK_BALANCES. */
+export function mockBalancesFromEnv(env: NodeJS.ProcessEnv): Record<string, bigint> {
+  const raw = env.SINGIT_MOCK_BALANCES;
+  if (!raw) return { ...DEFAULT_MOCK_BALANCES };
+  return Object.fromEntries(Object.entries(JSON.parse(raw) as Record<string, string>).map(([addr, v]) => [addr, BigInt(v)]));
 }
 
 export class MockBackend implements PaymentBackend {
@@ -46,7 +62,7 @@ export class MockBackend implements PaymentBackend {
 
   constructor(opts: MockBackendOptions = {}) {
     this.now = opts.now ?? (() => Math.floor(Date.now() / 1000));
-    this.balances = new Map(Object.entries(opts.balances ?? {}));
+    this.balances = new Map(Object.entries(opts.balances ?? DEFAULT_MOCK_BALANCES));
   }
 
   private balanceOf(address: string): bigint {

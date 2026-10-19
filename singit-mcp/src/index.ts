@@ -8,7 +8,7 @@ import { createServer } from "node:http";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { approvalSecretFromEnv } from "./approval.js";
 import { Capture402Backend } from "./backend/capture402.js";
-import { MockBackend } from "./backend/mock.js";
+import { mockBalancesFromEnv, MockBackend } from "./backend/mock.js";
 import { DEVNET_USDC_MINT, type PaymentBackend } from "./backend/types.js";
 import { createHttpHandler } from "./http.js";
 import { createMcpServer } from "./server.js";
@@ -22,11 +22,7 @@ function buildBackend(): PaymentBackend {
       mint: DEVNET_USDC_MINT,
     });
   }
-  const raw = process.env.SINGIT_MOCK_BALANCES;
-  const balances: Record<string, bigint> = raw
-    ? Object.fromEntries(Object.entries(JSON.parse(raw) as Record<string, string>).map(([addr, v]) => [addr, BigInt(v)]))
-    : { "buyer-agent": 100_000_000n, "seller-agent": 20_000_000n };
-  return new MockBackend({ balances });
+  return new MockBackend({ balances: mockBalancesFromEnv(process.env) });
 }
 
 const backend = buildBackend();
@@ -53,6 +49,10 @@ if (useHttp) {
     routeSecret,
     mcpPerMin: Number(process.env.SINGIT_RATE_LIMIT_PER_MIN ?? 120),
     statePerMin: Number(process.env.SINGIT_STATE_RATE_LIMIT_PER_MIN ?? 600),
+    resetService:
+      backendName === "mock"
+        ? () => new PaymentService({ backend: new MockBackend({ balances: mockBalancesFromEnv(process.env) }), approvalSecret })
+        : undefined,
   });
   const httpServer = createServer(handler);
 

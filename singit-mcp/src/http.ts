@@ -20,12 +20,14 @@ export interface HttpHandlerOptions {
   backendName: string;
   approvalSecret?: string;
   routeSecret?: string;
-  /** Requests/min for the "mcp" bucket (POST/GET/DELETE /mcp, POST /human/resolve). Default 120. */
+  /** Requests/min for the "mcp" bucket (POST/GET/DELETE /mcp, POST /human/resolve, POST /human/reset). Default 120. */
   mcpPerMin?: number;
   /** Requests/min for the "state" bucket (GET /api/state). Default 600. */
   statePerMin?: number;
   /** ms clock, for limiter tests. */
   now?: () => number;
+  /** Builds a fresh PaymentService for POST /human/reset. Only honored when backendName === "mock". */
+  resetService?: () => PaymentService;
 }
 
 /** Recursively converts bigints to strings so the result is JSON.stringify-able. */
@@ -76,8 +78,27 @@ function secretsMatch(a: string, b: string): boolean {
   return bufA.length === bufB.length && timingSafeEqual(bufA, bufB);
 }
 
+/**
+ * Shared /human/* route-secret check: not configured -> 403 HUMAN_ROUTE_DISABLED; missing/wrong
+ * `x-singit-human-secret` header -> 401 HUMAN_AUTH_REQUIRED. Sends the error response itself.
+ */
+function checkHumanRouteSecret(req: IncomingMessage, res: ServerResponse, routeSecret: string | undefined): boolean {
+  if (!routeSecret) {
+    sendJson(res, 403, { ok: false, code: "HUMAN_ROUTE_DISABLED" });
+    return false;
+  }
+  const header = req.headers["x-singit-human-secret"];
+  const provided = typeof header === "string" ? header : "";
+  if (!provided || !secretsMatch(provided, routeSecret)) {
+    sendJson(res, 401, { ok: false, code: "HUMAN_AUTH_REQUIRED" });
+    return false;
+  }
+  return true;
+}
+
 export function createHttpHandler(opts: HttpHandlerOptions): (req: IncomingMessage, res: ServerResponse) => void {
-  const { service, backendName, approvalSecret, routeSecret } = opts;
+  const { backendName, approvalSecret, routeSecret, resetService } = opts;
+  let service = opts.service;
   const now = opts.now ?? Date.now;
   const allowMcp = createRateLimiter(opts.mcpPerMin ?? 120, now);
   const allowState = createRateLimiter(opts.statePerMin ?? 600, now);
@@ -164,16 +185,7 @@ export function createHttpHandler(opts: HttpHandlerOptions): (req: IncomingMessa
       // Token from `npm run approve` is itself the proof; pass it through as-is.
       approvalToken = forgedToken;
     } else {
-      if (!routeSecret) {
-        sendJson(res, 403, { ok: false, code: "HUMAN_ROUTE_DISABLED" });
-        return;
-      }
-      const header = req.headers["x-singit-human-secret"];
-      const provided = typeof header === "string" ? header : "";
-      if (!provided || !secretsMatch(provided, routeSecret)) {
-        sendJson(res, 401, { ok: false, code: "HUMAN_AUTH_REQUIRED" });
-        return;
-      }
+      if (!checkHumanRouteSecret(req, res, routeSecret)) return;
       if (approvalSecret) {
         approvalToken = issueApprovalToken(approvalSecret, { disputeId, outcome, refundAmount: refundAmount ?? 0n });
       }
@@ -198,6 +210,43 @@ export function createHttpHandler(opts: HttpHandlerOptions): (req: IncomingMessa
     }
   }
 
+  async function handleHumanReset(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!allowMcp(clientKeyOf(req))) {
+      sendRateLimited(res);
+      return;
+    }
+    if (!checkHumanRouteSecret(req, res, routeSecret)) return;
+
+    if (backendName !== "mock" || !resetService) {
+      sendJson(res, 409, { ok: false, code: "RESET_MOCK_ONLY", reason: "reset only in mock mode" });
+      return;
+    }
+
+    let raw: string;
+    try {
+      raw = await readBody(req, HUMAN_RESOLVE_BODY_LIMIT);
+    } catch {
+      sendJson(res, 400, { ok: false, code: "INVALID_INPUT", reason: "body too large" });
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = raw ? JSON.parse(raw) : {};
+    } catch {
+      sendJson(res, 400, { ok: false, code: "INVALID_INPUT", reason: "invalid JSON body" });
+      return;
+    }
+    if (typeof parsed !== "object" || parsed === null) {
+      sendJson(res, 400, { ok: false, code: "INVALID_INPUT", reason: "body must be a JSON object" });
+      return;
+    }
+    const { actor } = parsed as Record<string, unknown>;
+
+    service = resetService();
+    service.recordReset(typeof actor === "string" && actor ? actor : "human");
+    sendJson(res, 200, { ok: true, reset: true, audit: service.listAuditLog() });
+  }
+
   return function httpHandler(req: IncomingMessage, res: ServerResponse): void {
     void (async () => {
       try {
@@ -218,6 +267,10 @@ export function createHttpHandler(opts: HttpHandlerOptions): (req: IncomingMessa
         }
         if (method === "POST" && url === "/human/resolve") {
           await handleHumanResolve(req, res);
+          return;
+        }
+        if (method === "POST" && url === "/human/reset") {
+          await handleHumanReset(req, res);
           return;
         }
         res.writeHead(404).end();
