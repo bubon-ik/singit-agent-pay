@@ -2,6 +2,13 @@
 
 Status as of 19 October 2026. This file records offline evidence only. A skipped or unrun test is not a PASS, and offline tests are not live economic acceptance.
 
+The tables below retain their original pinned historical SHA and results. The
+scenario and current acceptance sequence are [MVP-SCENARIO.md](MVP-SCENARIO.md);
+new journal/runtime changes require fresh evidence on their final exact revision.
+Journal v2 replaces the historical tail-repair policy with byte-preserving refusal;
+see [JOURNAL.md](JOURNAL.md). This edit does not grant offline readiness, authorize
+a run, accept the newer source, or close the remaining refund/reclaim/LLM gates.
+
 ## Pinned candidate
 
 | Item | Value |

@@ -1,7 +1,10 @@
 export function deriveTimeline(audit, mandates) {
   const holdById = new Map(mandates.flatMap((m) => (m.holds ?? []).map((h) => [h.id, h])));
   const kinds = { create_mandate: "mandate", hold: "hold", capture: "capture", release: "release", refund: "refund", open_dispute: "dispute", resolve_dispute: "resolve", reset: "reset" };
-  return audit.map((a, index) => {
+  // An atomic journal proof and its ordinary business audit describe one payment.
+  // Keep a proof visible after a crash that prevented the ordinary row, without a second charge card.
+  const businessReceipts = new Set(audit.filter(a => a.action !== "operation_outcome" && a.outcome === "ok" && a.txSig).map(a => a.txSig));
+  return audit.filter(a => a.action !== "operation_outcome" || !a.txSig || !businessReceipts.has(a.txSig)).map((a, index) => {
     const failed = a.outcome !== "ok", code = a.code ?? null;
     const blockedLabels = { OVER_PER_TX_CAP: "over per-tx cap", COUNTERPARTY_NOT_ALLOWED: "counterparty not allowed", OVER_BUDGET: "over budget", HUMAN_APPROVAL_REQUIRED: "human approval required", PRINCIPAL_FORBIDDEN: "not allowed for this agent" };
     const hold = holdById.get(a.holdId);
@@ -11,7 +14,10 @@ export function deriveTimeline(audit, mandates) {
     const payee = String(hold?.payee ?? "").replace(/^agent:/, "");
     let message;
     let detail;
-    if (code === "OPERATION_UNKNOWN") {
+    if (a.action === "operation_outcome") {
+      message = `Original ${String(a.operationAction ?? "operation").replaceAll("_", " ")} ${a.operationState ?? a.outcome}`;
+      detail = a.reason;
+    } else if (code === "OPERATION_UNKNOWN") {
       message = "OUTCOME UNKNOWN: funds reserved, reconciling";
       detail = String(a.reason ?? "").replace(/^BLOCKED:\s*/, "");
     } else if (code === "OPERATION_PENDING") {
@@ -43,7 +49,7 @@ export function deriveTimeline(audit, mandates) {
     }
     else if (a.action === "reset") message = "Mock state reset by human";
     else message = a.reason;
-    const kind = code === "OPERATION_UNKNOWN" || /outcome_unknown/i.test(a.action ?? "") ? "unknown" : code === "OPERATION_PENDING" ? "pending" : /reconcile/i.test(a.action ?? "") ? "reconcile" : a.action === "reset" ? "reset" : failed ? "blocked" : kinds[a.action] ?? "blocked";
+    const kind = a.action === "operation_outcome" ? "reconcile" : code === "OPERATION_UNKNOWN" || /outcome_unknown/i.test(a.action ?? "") ? "unknown" : code === "OPERATION_PENDING" ? "pending" : /reconcile/i.test(a.action ?? "") ? "reconcile" : a.action === "reset" ? "reset" : failed ? "blocked" : kinds[a.action] ?? "blocked";
     const ok = kind === "unknown" || kind === "pending" || kind === "reconcile" ? true : !failed;
     return { key: a.seq ?? `${a.ts}:${index}`, ts: a.ts, kind, ok, message, detail, code, amount: a.amount, txRef: a.txSig, mandateId: a.mandateId, holdId: a.holdId, disputeId: a.disputeId, payee: hold?.payee };
   });

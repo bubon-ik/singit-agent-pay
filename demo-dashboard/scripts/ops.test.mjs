@@ -4,6 +4,20 @@ import { activeReservation, fmtUsdc, opsView, renderOpsHtml, storyStartBlocker }
 import { deriveTimeline } from "../lib/derive.mjs";
 import { publicOperation } from "../lib/public-state.mjs";
 
+test("atomic outcome and business receipt produce one charge card; orphan proof remains observable after a crash", () => {
+  const proof = { seq: 1, action: "operation_outcome", operationId: "op-1", operationAction: "capture", operationState: "succeeded",
+    outcome: "ok", code: null, txSig: "mock-tx-1", amount: "650000", reason: "Original capture outcome committed" };
+  const business = { seq: 2, action: "capture", outcome: "ok", code: null, txSig: "mock-tx-1", amount: "650000" };
+  const timeline = deriveTimeline([proof, business], []);
+  assert.equal(timeline.length, 1);
+  assert.equal(timeline[0].kind, "capture");
+  const recovered = deriveTimeline([proof], []);
+  assert.equal(recovered.length, 1);
+  assert.equal(recovered[0].kind, "reconcile");
+  assert.equal(recovered[0].message, "Original capture succeeded");
+  assert.equal(recovered[0].txRef, "mock-tx-1");
+});
+
 test("restored live history allows an explicit new story without clearing prior records", () => {
   const s = { chain: "devnet", story: { state: "idle" }, timeline: [{ kind: "blocked" }], ops: [{ state: "failed" }], disputes: [] };
   const before = JSON.stringify(s);

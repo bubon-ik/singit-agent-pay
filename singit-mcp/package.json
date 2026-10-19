@@ -22,7 +22,8 @@
     "approve": "tsx scripts/approve.ts",
     "devnet:smoke": "tsx scripts/devnet-smoke.ts",
     "demo:all": "bash scripts/demo-all.sh",
-    "live:all": "bash scripts/live-all.sh"
+    "live:all": "bash scripts/live-all.sh",
+    "inspect:state": "TSX_DISABLE_CACHE=1 node --import tsx scripts/inspect-state.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

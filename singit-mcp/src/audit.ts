@@ -52,6 +52,8 @@ export type AuditAction =
   | "reset"
   // one row per operation state transition during reconcile(); not an MCP tool call itself.
   | "reconcile"
+  // Durable terminal proof, committed with the operation and accounting, before a reply.
+  | "operation_outcome"
   // BackendOutcomeUnknown / lost response: reservation kept. Dashboard matches case-insensitively.
   | "OUTCOME_UNKNOWN";
 
@@ -83,4 +85,9 @@ export interface AuditEntry {
   /** Escrow state AFTER the call (base-unit strings), when a hold is involved. */
   held: string | null;
   refundable: string | null;
+  /** Present on the atomic terminal proof; business-call audit rows remain separate. */
+  operationId?: string;
+  operationAction?: string;
+  operationState?: "succeeded" | "failed";
+  recovered?: boolean;
 }

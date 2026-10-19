@@ -377,7 +377,31 @@ export class Capture402Backend implements PaymentBackend {
     });
   }
 
+  private environmentFailure?: BackendError;
+  private environmentObservers?: Set<() => void>;
+
+  /** Runtime latches admission closed on a verified identity mismatch, including one found by
+   * a read/reconciliation. No polling, signing or RPC is added by registering an observer. */
+  onEnvironmentFailure(observer: () => void): () => void {
+    (this.environmentObservers ??= new Set()).add(observer);
+    if (this.environmentFailure) observer();
+    return () => { this.environmentObservers?.delete(observer); };
+  }
+
   private async environment(): Promise<void> {
+    if (this.environmentFailure) throw this.environmentFailure;
+    try {
+      await this.verifyEnvironment();
+    } catch (error) {
+      if (error instanceof BackendError && ["invalid_network", "invalid_deployment", "wrong_mint"].includes(error.code)) {
+        this.environmentFailure = error;
+        for (const observer of this.environmentObservers ?? []) observer();
+      }
+      throw error;
+    }
+  }
+
+  private async verifyEnvironment(): Promise<void> {
     const genesis = await this.read("getGenesisHash", options =>
       this.rpc.getGenesisHash().send(options),
     );

@@ -50,6 +50,10 @@ The policy runs in the service; the money rules run on-chain. The capture402 pro
 
 ## Payment safety
 
+The agreed narrow workflow and ordered acceptance gates are in
+[MVP-SCENARIO.md](docs/MVP-SCENARIO.md). Journal compatibility and read-only
+diagnosis when startup refuses are documented in [JOURNAL.md](docs/JOURNAL.md).
+
 Payments fail in messy ways: lost responses, timeouts, crashes between "sent" and "saved". The server is built so that none of these turns into a second payment.
 
 - **One intent, one operation.** Every write carries an `idempotencyKey`, which is required on devnet. A retry with the same key returns the original result and `operationId`, even after a full capture or a passed deadline. Two identical requests at once still send only once.

@@ -55,7 +55,7 @@ const op: OperationRecord = {
   mandateId: "m-1",
   holdId: "mock-hold-1",
   params: { paramsHash: "h" },
-  state: "succeeded",
+  state: "pending",
   reservation: "1000",
   createdAt: 1,
   updatedAt: 1,
@@ -108,18 +108,17 @@ describe("MemoryStateStore", () => {
 });
 
 describe("FileStateStore", () => {
-  test("repairs an interrupted final line before appending so the next restart can load", () => {
+  test("refuses an interrupted final line and preserves every original byte", () => {
     const dir = tmpDir();
     const store = new FileStateStore(dir);
     store.putMandate({ ...mandate, note: "Привет" });
     const file = join(dir, "state.jsonl");
     writeFileSync(file, readFileSync(file, "utf8") + '{"t":"op","v":1,');
+    const original = readFileSync(file);
     const recovered = new FileStateStore(dir);
-    expect(recovered.load().mandates[0].note).toBe("Привет");
-    recovered.putHold(hold);
-    const restarted = new FileStateStore(dir).load();
-    expect(restarted.mandates).toHaveLength(1);
-    expect(restarted.holds).toEqual([hold]);
+    expect(() => recovered.load()).toThrow("JOURNAL_CORRUPT");
+    expect(() => recovered.putHold(hold)).toThrow();
+    expect(readFileSync(file)).toEqual(original);
   });
   test("round-trips through disk: last write per id wins, seqs computed from ids", () => {
     const dir = tmpDir();
@@ -142,7 +141,7 @@ describe("FileStateStore", () => {
     expect(snap.seqs).toEqual({ mandateSeq: 1, disputeSeq: 1, opSeq: 1, auditSeq: 1 });
   });
 
-  test("tolerates a truncated/corrupt LAST line (crash mid-write)", () => {
+  test("refuses a truncated LAST line without repairing history", () => {
     const dir = tmpDir();
     const store = new FileStateStore(dir);
     store.putMandate(mandate);
@@ -152,9 +151,9 @@ describe("FileStateStore", () => {
     writeFileSync(filePath, `${existing}{"t":"mandate","v":1,"data":{"id":"m-2","committed":`); // truncated, no trailing newline
 
     const reopened = new FileStateStore(dir);
-    const snap = reopened.load();
-    expect(snap.mandates).toHaveLength(1);
-    expect(snap.mandates[0].id).toBe("m-1");
+    const original = readFileSync(filePath);
+    expect(() => reopened.load()).toThrow("JOURNAL_CORRUPT");
+    expect(readFileSync(filePath)).toEqual(original);
   });
 
   test("throws on corruption that is NOT the last line", () => {

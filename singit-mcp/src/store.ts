@@ -5,10 +5,11 @@
  * Every stored amount-like field is a decimal string (bigint serialized), never a bigint or
  * number, so a Snapshot round-trips through JSON without a custom reviver.
  */
-import { appendFileSync, chmodSync, closeSync, existsSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, constants, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeSync, type BigIntStats } from "node:fs";
 import { join } from "node:path";
 import type { AuditEntry, RefusalCode } from "./audit.js";
 import type { PreparedTx } from "./backend/types.js";
+import { JournalError, parseJournal, validateRecord, type RecordLine } from "./journal.js";
 
 export interface StoredMandate {
   id: string;
@@ -114,6 +115,8 @@ export interface Snapshot {
   ops: OperationRecord[];
   audit: AuditEntry[];
   seqs: Seqs;
+  /** Old non-atomic terminal records cannot safely be upgraded by guessing their effects. */
+  legacyIssues?: string[];
 }
 
 /** Atomic commit of a terminal op outcome plus the hold/mandate snapshot(s) it produced, written
@@ -125,6 +128,15 @@ export interface OpCommit {
   op: OperationRecord;
   mandate?: StoredMandate;
   hold?: StoredHold;
+  dispute?: StoredDispute;
+  audit?: AuditEntry;
+}
+
+export interface StateCommit {
+  mandate?: StoredMandate;
+  hold?: StoredHold;
+  dispute?: StoredDispute;
+  audit: AuditEntry;
 }
 
 export interface StateStore {
@@ -134,6 +146,7 @@ export interface StateStore {
   putDispute(d: StoredDispute): void;
   putOp(op: OperationRecord): void;
   putOpCommit(commit: OpCommit): void;
+  putStateCommit(commit: StateCommit): void;
   appendAudit(e: AuditEntry): void;
 }
 
@@ -161,158 +174,155 @@ export class MemoryStateStore implements StateStore {
   private readonly audit: AuditEntry[] = [];
 
   load(): Snapshot {
-    return {
+    return structuredClone({
       mandates: [...this.mandates.values()],
       holds: [...this.holds.values()],
       disputes: [...this.disputes.values()],
       ops: [...this.ops.values()],
       audit: [...this.audit],
       seqs: computeSeqs(this.mandates.values(), this.disputes.values(), this.ops.values(), this.audit),
-    };
+    });
   }
 
   putMandate(m: StoredMandate): void {
-    this.mandates.set(m.id, m);
+    this.mandates.set(m.id, structuredClone(m));
   }
   putHold(h: StoredHold): void {
-    this.holds.set(h.id, h);
+    this.holds.set(h.id, structuredClone(h));
   }
   putDispute(d: StoredDispute): void {
-    this.disputes.set(d.id, d);
+    this.disputes.set(d.id, structuredClone(d));
   }
   putOp(op: OperationRecord): void {
-    this.ops.set(op.id, op);
+    this.ops.set(op.id, structuredClone(op));
   }
   putOpCommit(commit: OpCommit): void {
-    this.ops.set(commit.op.id, commit.op);
-    if (commit.mandate) this.mandates.set(commit.mandate.id, commit.mandate);
-    if (commit.hold) this.holds.set(commit.hold.id, commit.hold);
+    this.putOp(commit.op);
+    if (commit.mandate) this.putMandate(commit.mandate);
+    if (commit.hold) this.putHold(commit.hold);
+    if (commit.dispute) this.putDispute(commit.dispute);
+    if (commit.audit) this.appendAudit(commit.audit);
+  }
+  putStateCommit(commit: StateCommit): void {
+    if (commit.mandate) this.putMandate(commit.mandate);
+    if (commit.hold) this.putHold(commit.hold);
+    if (commit.dispute) this.putDispute(commit.dispute);
+    this.appendAudit(commit.audit);
   }
   appendAudit(e: AuditEntry): void {
-    this.audit.push(e);
+    this.audit.push(structuredClone(e));
   }
 }
 
-type RecordLine =
-  | { t: "mandate"; v: 1; data: StoredMandate }
-  | { t: "hold"; v: 1; data: StoredHold }
-  | { t: "dispute"; v: 1; data: StoredDispute }
-  | { t: "op"; v: 1; data: OperationRecord }
-  | { t: "audit"; v: 1; data: AuditEntry }
-  | { t: "opcommit"; v: 1; data: OpCommit };
-
-/**
- * Append-only JSONL durable store: one `state.jsonl` file per dir, one JSON object per line.
- * Replay on load (last record per id wins). A crash mid-write can leave the LAST line truncated
- * or corrupt; that line is skipped. Any earlier corruption is a real integrity problem and throws.
- */
+/** Append-only v2 journal. Existing v1 bytes are read, never rewritten or truncated.
+ * Unknown formats, ambiguous legacy accounting and every incomplete/corrupt line refuse load. */
 export class FileStateStore implements StateStore {
+  private readonly directory: string;
+  private readonly directoryIdentity: BigIntStats;
   private readonly filePath: string;
+  private expected: BigIntStats;
+  private failed = false;
 
   constructor(dir: string) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    chmodSync(dir, 0o700);
-    this.filePath = join(dir, "state.jsonl");
-    if (!existsSync(this.filePath)) {
-      appendFileSync(this.filePath, "", { mode: 0o600 });
+    const directory = lstatSync(dir, { bigint: true });
+    if (!directory.isDirectory() || directory.isSymbolicLink()) throw new JournalError("JOURNAL_CHANGED", 0);
+    if ((directory.mode & 0o777n) !== 0o700n) chmodSync(dir, 0o700);
+    this.directory = realpathSync(dir);
+    this.directoryIdentity = lstatSync(this.directory, { bigint: true });
+    this.filePath = join(this.directory, "state.jsonl");
+    const existing = lstatSync(this.filePath, { bigint: true, throwIfNoEntry: false });
+    if (existing && (!existing.isFile() || existing.isSymbolicLink() || existing.nlink !== 1n)) {
+      throw new JournalError("JOURNAL_CHANGED", 0);
     }
-    chmodSync(this.filePath, 0o600);
+    if (!existing) {
+      const fd = openSync(this.filePath, "wx", 0o600);
+      try { fsyncSync(fd); } finally { closeSync(fd); }
+      const parent = openSync(this.directory, "r");
+      try { fsyncSync(parent); } finally { closeSync(parent); }
+    }
+    const fd = openSync(this.filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const info = fstatSync(fd, { bigint: true });
+      if (!info.isFile() || info.nlink !== 1n || (existing && (existing.ino !== info.ino || existing.dev !== info.dev))) {
+        throw new JournalError("JOURNAL_CHANGED", 0);
+      }
+      // Do not alter ctime on every reader construction when permissions already match.
+      if ((info.mode & 0o777n) !== 0o600n) fchmodSync(fd, 0o600);
+      this.expected = fstatSync(fd, { bigint: true });
+      this.checkPath(fd);
+    } finally { closeSync(fd); }
+  }
+
+  private checkPath(fd: number): BigIntStats {
+    const directory = lstatSync(this.directory, { bigint: true });
+    const path = lstatSync(this.filePath, { bigint: true }), opened = fstatSync(fd, { bigint: true });
+    const owner = process.getuid?.();
+    if (!directory.isDirectory() || directory.isSymbolicLink() || directory.dev !== this.directoryIdentity.dev ||
+        directory.ino !== this.directoryIdentity.ino || (directory.mode & 0o077n) !== 0n ||
+        (owner !== undefined && directory.uid !== BigInt(owner)) ||
+        !path.isFile() || path.isSymbolicLink() || !opened.isFile() || path.nlink !== 1n || opened.nlink !== 1n ||
+        path.dev !== this.expected.dev || path.ino !== this.expected.ino || path.dev !== opened.dev || path.ino !== opened.ino ||
+        (opened.mode & 0o077n) !== 0n || (owner !== undefined && opened.uid !== BigInt(owner)) ||
+        path.size !== opened.size || path.mtimeNs !== opened.mtimeNs || path.ctimeNs !== opened.ctimeNs) {
+      throw new JournalError("JOURNAL_CHANGED", 0);
+    }
+    return opened;
+  }
+
+  private checkContinuity(info: BigIntStats): void {
+    if (info.size !== this.expected.size || info.mtimeNs !== this.expected.mtimeNs || info.ctimeNs !== this.expected.ctimeNs) {
+      throw new JournalError("JOURNAL_CHANGED", 0);
+    }
   }
 
   private appendLine(line: RecordLine): void {
-    const fd = openSync(this.filePath, "a");
+    if (this.failed) throw new Error("Journal append previously failed; preserve and inspect before restart");
+    let fd: number | undefined;
     try {
-      writeSync(fd, `${JSON.stringify(line)}\n`);
+      validateRecord(line, 0);
+      // A replacement FIFO must not block this process before identity can be checked.
+      fd = openSync(this.filePath, constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      this.checkContinuity(this.checkPath(fd));
+      const bytes = Buffer.from(`${JSON.stringify(line)}\n`);
+      for (let offset = 0; offset < bytes.length;) {
+        const written = writeSync(fd, bytes, offset, bytes.length - offset);
+        if (written <= 0) throw new Error("Incomplete journal write");
+        offset += written;
+      }
       fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
+      const after = this.checkPath(fd);
+      if (after.size !== this.expected.size + BigInt(bytes.length)) throw new JournalError("JOURNAL_CHANGED", 0);
+      this.expected = after;
+    } catch (error) {
+      this.failed = true;
+      throw error;
+    } finally { if (fd !== undefined) closeSync(fd); }
   }
 
   load(): Snapshot {
-    const raw = readFileSync(this.filePath, "utf8");
-    const lines = raw.split("\n");
-    while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-
-    const mandates = new Map<string, StoredMandate>();
-    const holds = new Map<string, StoredHold>();
-    const disputes = new Map<string, StoredDispute>();
-    const ops = new Map<string, OperationRecord>();
-    const auditBySeq = new Map<number, AuditEntry>();
-
-    for (let i = 0; i < lines.length; i++) {
-      let rec: RecordLine;
-      try {
-        rec = JSON.parse(lines[i]) as RecordLine;
-      } catch (err) {
-        if (i === lines.length - 1) {
-          // Remove the interrupted tail before the next append; otherwise it becomes a
-          // corrupt interior line and prevents the following restart from loading.
-          const prefix = lines.slice(0, i).join("\n") + (i > 0 ? "\n" : "");
-          const fd = openSync(this.filePath, "r+");
-          try {
-            ftruncateSync(fd, Buffer.byteLength(prefix));
-            fsyncSync(fd);
-          } finally {
-            closeSync(fd);
-          }
-          continue;
-        }
-        throw new Error(`corrupt state store ${this.filePath}:${i + 1}: ${(err as Error).message}`);
-      }
-      switch (rec.t) {
-        case "mandate":
-          mandates.set(rec.data.id, rec.data);
-          break;
-        case "hold":
-          holds.set(rec.data.id, rec.data);
-          break;
-        case "dispute":
-          disputes.set(rec.data.id, rec.data);
-          break;
-        case "op":
-          ops.set(rec.data.id, rec.data);
-          break;
-        case "audit":
-          auditBySeq.set(rec.data.seq, rec.data);
-          break;
-        case "opcommit":
-          ops.set(rec.data.op.id, rec.data.op);
-          if (rec.data.mandate) mandates.set(rec.data.mandate.id, rec.data.mandate);
-          if (rec.data.hold) holds.set(rec.data.hold.id, rec.data.hold);
-          break;
-      }
+    let fd: number | undefined;
+    try {
+      fd = openSync(this.filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      this.checkContinuity(this.checkPath(fd));
+      const bytes = readFileSync(fd);
+      this.checkContinuity(this.checkPath(fd));
+      if (BigInt(bytes.length) !== this.expected.size) throw new JournalError("JOURNAL_CHANGED", 0);
+      let raw: string;
+      try { raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+      catch { throw new JournalError("JOURNAL_CORRUPT", 0); }
+      return parseJournal(raw);
     }
-
-    const audit = [...auditBySeq.values()].sort((a, b) => a.seq - b.seq);
-    return {
-      mandates: [...mandates.values()],
-      holds: [...holds.values()],
-      disputes: [...disputes.values()],
-      ops: [...ops.values()],
-      audit,
-      seqs: computeSeqs(mandates.values(), disputes.values(), ops.values(), audit),
-    };
+    catch (error) { this.failed = true; throw error; }
+    finally { if (fd !== undefined) closeSync(fd); }
   }
-
-  putMandate(m: StoredMandate): void {
-    this.appendLine({ t: "mandate", v: 1, data: m });
-  }
-  putHold(h: StoredHold): void {
-    this.appendLine({ t: "hold", v: 1, data: h });
-  }
-  putDispute(d: StoredDispute): void {
-    this.appendLine({ t: "dispute", v: 1, data: d });
-  }
-  putOp(op: OperationRecord): void {
-    this.appendLine({ t: "op", v: 1, data: op });
-  }
-  putOpCommit(commit: OpCommit): void {
-    this.appendLine({ t: "opcommit", v: 1, data: commit });
-  }
-  appendAudit(e: AuditEntry): void {
-    this.appendLine({ t: "audit", v: 1, data: e });
-  }
+  putMandate(data: StoredMandate): void { this.appendLine({ t: "mandate", v: 2, data }); }
+  putHold(data: StoredHold): void { this.appendLine({ t: "hold", v: 2, data }); }
+  putDispute(data: StoredDispute): void { this.appendLine({ t: "dispute", v: 2, data }); }
+  putOp(data: OperationRecord): void { this.appendLine({ t: "op", v: 2, data }); }
+  putOpCommit(data: OpCommit): void { this.appendLine({ t: "opcommit", v: 2, data }); }
+  putStateCommit(data: StateCommit): void { this.appendLine({ t: "statecommit", v: 2, data }); }
+  appendAudit(data: AuditEntry): void { this.appendLine({ t: "audit", v: 2, data }); }
 }
 
 /** SINGIT_STATE_DIR set -> durable FileStateStore in that dir; else an in-memory store (default). */

@@ -1,6 +1,6 @@
 # Devnet operator runbook (MVP-08, #15)
 
-Experimental Solana devnet only. Not production software and not audited. Read [RELEASE-GATE.md](RELEASE-GATE.md) first: a live run needs a GO there.
+Experimental Solana devnet only. Not production software and not audited. Read [RELEASE-GATE.md](RELEASE-GATE.md) first. The ordered gates in [MVP-SCENARIO.md](MVP-SCENARIO.md) distinguish offline readiness, explicit authorization for one run, and final acceptance after that run. None is granted by this document.
 
 The core rule: **UNKNOWN or any invariant failure stops writes first.** Never retry an uncertain payment with a new key, refresh its blockhash or salt, switch RPC provider, clear the journal, or compensate automatically.
 
@@ -8,7 +8,7 @@ The core rule: **UNKNOWN or any invariant failure stops writes first.** Never re
 
 | Item | Value |
 |---|---|
-| Scenario (one) | e.g. hold 1 USDC → capture 0.65 → release 0.35 |
+| Scenario (one) | hold 1 USDC → capture 0.65 with atomic release of 0.35; no separate release transaction |
 | USDC cap for the whole run | |
 | Payer SOL cap / merchant SOL cap | see the fee table in [CAPTURE402-DEVNET.md](CAPTURE402-DEVNET.md) |
 | Maximum attempts | 1 (UNKNOWN is never repeated) |
@@ -63,6 +63,10 @@ Log every `operationId` the agent receives, together with its intent and idempot
 - Use `kill -9` only for a hung process. Then follow section 6 before restarting.
 
 ## 5. When something goes wrong
+
+If startup refuses, use the strictly offline inspection command in [JOURNAL.md](JOURNAL.md).
+It imports no backend and never repairs or truncates records. Corrupt/unsupported
+journals and ambiguous legacy terminal accounting remain blocked for review.
 
 | Signal | Do | Never |
 |---|---|---|

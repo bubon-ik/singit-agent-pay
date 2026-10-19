@@ -8,6 +8,7 @@ import { Capture402Backend } from "./backend/capture402.js";
 import type { PaymentBackend } from "./backend/types.js";
 import { PaymentService } from "./service.js";
 import { FileStateStore } from "./store.js";
+import { JournalError } from "./journal.js";
 
 export class StartupError extends Error {
   constructor(public readonly code: string, message: string) {
@@ -122,9 +123,10 @@ export async function createServiceRuntime(
   // namespace) -> load -> read-only reconciliation of originals -> preflight -> admission.
   const persistence = live ? privateStore(env.SINGIT_STATE_DIR) : undefined;
   let releaseNamespace = () => {};
+  let stopObserving = () => {};
   const closeAll = () => {
-    releaseNamespace();
-    persistence?.close();
+    stopObserving();
+    try { releaseNamespace(); } finally { persistence?.close(); }
   };
   try {
     if (live) releaseNamespace = namespaceLock(env);
@@ -136,9 +138,20 @@ export async function createServiceRuntime(
       store: persistence?.store,
       live,
     });
+    if (backend instanceof Capture402Backend) {
+      stopObserving = backend.onEnvironmentFailure(() => {
+        service.closeAdmission("ADMISSION_CLOSED", "accepted deployment, network or mint no longer matches; operator review and restart required");
+      });
+    }
     if (live) {
+      const requireAdmission = () => {
+        if (!service.admissionStatus().open) {
+          throw new StartupError("STARTUP_ADMISSION_CLOSED", "Startup refused economic admission; inspect the retained journal offline");
+        }
+      };
       // Only the original transaction can settle an uncertain outcome. Recovery cannot send.
       await service.reconcilePending({ readOnly: true });
+      requireAdmission();
       const unresolved = service.listOperations().filter(op => op.state === "pending" || op.state === "unknown");
       if (unresolved.length) {
         throw new StartupError("STARTUP_RECONCILIATION_REQUIRED", `Startup stopped: ${unresolved.length} original operation(s) remain unresolved; journal and reservations retained. Inspect original signatures before restarting`);
@@ -146,15 +159,21 @@ export async function createServiceRuntime(
       if (backend instanceof Capture402Backend) {
         await backend.preflight(env.SINGIT_PAYER_ADDRESS ?? "", env.SINGIT_MERCHANT_ADDRESS ?? "");
       }
+      requireAdmission();
     }
     const close = () => {
-      // Graceful shutdown: stop admitting economic writes first; journal and evidence stay as they are.
-      service.closeAdmission("ADMISSION_CLOSED", "runtime is shutting down");
-      closeAll();
+      service.shutdown(() => {
+        try { closeAll(); }
+        catch {
+          // Cleanup failure must not turn an already committed payment into an apparent failure.
+          console.error("MCP shutdown could not release every custody lock; operator inspection required");
+        }
+      });
     };
     return { service, backendName: live ? "devnet" : "mock", close };
   } catch (error) {
     closeAll();
+    if (error instanceof JournalError) throw new StartupError(error.code, error.message);
     throw error;
   }
 }
