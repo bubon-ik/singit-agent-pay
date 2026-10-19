@@ -322,6 +322,52 @@ const rateLimit = (statusCode = 429) => new SolanaError(
   { statusCode, message: "SYNTHETIC_PRIVATE_PROVIDER_DETAIL", headers: new Headers({ "Retry-After": "0" }) },
 );
 
+test.each(["onPrepared", "retention", "pacing"] as const)(
+  "an identity failure observed during %s blocks the prepared original before send",
+  async boundary => {
+    let closed = false;
+    let original: PreparedTx | undefined;
+    const observeFailure = async () => {
+      f.genesis = "wrong-network";
+      await expect(f.backend.getStatus(original!.holdId!)).rejects.toMatchObject({ code: "invalid_network" });
+      expect(closed).toBe(true);
+      expect(f.sent).toHaveLength(0);
+    };
+    if (boundary === "retention") {
+      f.backend = new Capture402Backend(f.config, {
+        rpc: f.rpc,
+        loadSigner: async p => p === "payer" ? f.payer : f.merchant,
+        retainBeforeSend: observeFailure,
+      });
+    }
+    f.backend.onEnvironmentFailure(() => { closed = true; });
+    if (boundary === "pacing") {
+      // Pause only the dispatch pacing call; ordinary scheduled reads still run.
+      const scheduler = (f.backend as unknown as { scheduler: { pace(signal: AbortSignal): Promise<void> } }).scheduler;
+      const pace = scheduler.pace.bind(scheduler);
+      let paused = false;
+      vi.spyOn(scheduler, "pace").mockImplementation(async signal => {
+        await pace(signal);
+        if (original && !paused) {
+          paused = true;
+          await observeFailure();
+        }
+      });
+    }
+    await code(f.backend.hold(req(), { onPrepared: async prepared => {
+      original = structuredClone(prepared);
+      if (boundary === "onPrepared") await observeFailure();
+    } }), "invalid_network");
+    expect(f.sent).toHaveLength(0);
+    expect(original?.evidence?.signature).toBe(original?.txSig);
+    expect(f.backend.pendingOperation).toBeUndefined();
+    // A restored provider cannot reopen this backend or cause an automatic retry.
+    f.genesis = DEVNET_GENESIS_HASH;
+    await code(f.backend.hold(req()), "invalid_network");
+    expect(f.sent).toHaveLength(0);
+  },
+);
+
 test.each(["getFeeForMessage", "simulateTransaction", "getSignatureStatuses"])(
   "HTTP 429 on %s repeats only the same read and submits the original wire once",
   async method => {
