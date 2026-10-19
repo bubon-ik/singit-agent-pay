@@ -90,10 +90,31 @@ The receipt shapes in PaymentBackend are unchanged. The compatible error extensi
 
 Success requires the original signature at `finalized` with `err === null`.
 `sendTransaction` uses `maxRetries: 0`. No salt, blockhash or signed message is
-regenerated after a possible send. The backend instance blocks all further writes
-when UNKNOWN and allows read-only observation; `pendingOperation` exposes its
-volatile evidence. There is deliberately no reset/retry method. This volatile
-latch does not survive process recreation and is **not durable retry safety**.
+regenerated after a possible send. The backend protects one write/reconciliation at a time per instance. Overlapping
+calls get validation-phase `backend_busy` without another call's evidence. New
+writes while an original operation remains unresolved get validation-phase
+`reconciliation_required`; only the original possibly sent call raises UNKNOWN.
+`pendingOperation` exposes the original immutable evidence.
+
+`getTxOutcome(originalEvidence)` validates the original signed wire and returns
+`landed`, `failed`, `pending` or `not_found`, plus `terminal`, `expired`, finalized
+block height and a verified Payment snapshot. It clears the latch only for the
+original signature finalized with known err. Signature history missing, expiry,
+and matching/changed/absent Payment state alone never prove the original failed.
+The snapshot is bounded by the observed finalized epoch/status slot through
+`minContextSlot`; present-day token-account spendability is not payment history.
+Reconciliation does not send or sign anything. A persistence error keeps the
+latch. There is no reset/retry method. After restart the caller must load durable
+pending evidence and call reconciliation before admitting a new write; construction
+alone is **not durable retry safety**. [Solana's RPC documentation](https://solana.com/docs/rpc/http/getsignaturestatuses)
+describes the history search; [getTransaction](https://solana.com/docs/rpc/http/gettransaction)
+explicitly permits null when a transaction is not found at the requested commitment.
+
+Each economic method also accepts per-call `{onPrepared: async prepared => ...}`.
+This awaited hook carries `txSig` (alias of signature), PDA/holdId, salt, original
+amount/guards, wire and lifetime; its failure prevents send. PaymentService's
+hardening must pass it and await durable reservation/journal persistence. The
+synchronous factory does not silently create a journal for the MCP path.
 
 The optional `retainBeforeSend(evidence)` dependency runs before any possible
 submission; a sink failure prevents sending. The two live scripts use exclusive

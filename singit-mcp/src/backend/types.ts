@@ -107,15 +107,23 @@ export interface PaymentBackend {
   /** No capture402 instruction: mandates are off-chain. May no-op or persist/anchor terms. */
   createMandate(terms: MandateTerms): Promise<{ ref?: string }>;
   /** capture402 `authorize` (tag 0), payer-signed. */
-  hold(req: HoldRequest): Promise<HoldReceipt>;
+  hold(req: HoldRequest, options?: BackendWriteOptions): Promise<HoldReceipt>;
   /** capture402 `capture` (tag 2), merchant-signed. */
-  capture(req: CaptureRequest): Promise<TxReceipt>;
+  capture(
+    req: CaptureRequest,
+    options?: BackendWriteOptions,
+  ): Promise<TxReceipt>;
   /** capture402 `void` (tag 3), merchant-signed. */
-  release(req: ReleaseRequest): Promise<TxReceipt>;
+  release(
+    req: ReleaseRequest,
+    options?: BackendWriteOptions,
+  ): Promise<TxReceipt>;
   /** capture402 `refund` (tag 4), merchant-signed. */
-  refund(req: RefundRequest): Promise<TxReceipt>;
+  refund(req: RefundRequest, options?: BackendWriteOptions): Promise<TxReceipt>;
   /** Read + decode the Payment account. null if it does not exist. */
   getStatus(holdId: string): Promise<EscrowStatus | null>;
+  /** Observe the original transaction; optional for non-chain backends. Never resubmits. */
+  getTxOutcome?(evidence: UnknownOperation): Promise<BackendTxOutcome>;
 }
 
 /** Thrown by backends. `code` mirrors capture402 facilitator reasons where possible, e.g. "capture_deadline_expired". */
@@ -158,3 +166,22 @@ export class BackendOutcomeUnknown extends Error {
     this.name = "BackendOutcomeUnknown";
   }
 }
+
+/** Persist this exact operation before any possible send. Rejecting prevents submission. */
+export interface BackendWriteOptions {
+  onPrepared?: (prepared: PreparedOperation) => void | Promise<void>;
+}
+export interface PreparedOperation extends UnknownOperation {
+  readonly txSig: string;
+}
+export type BackendTxOutcome = {
+  status: "landed" | "failed" | "pending" | "not_found";
+  signature: string;
+  /** True only for original-signature finalized evidence, never inferred from state/expiry. */
+  terminal: boolean;
+  expired: boolean;
+  blockHeight: string;
+  payment: EscrowStatus | null;
+  slot?: string;
+  transactionError?: unknown;
+};

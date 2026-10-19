@@ -20,7 +20,9 @@ import {
   type Capture402Rpc,
 } from "../src/backend/capture402.js";
 import {
+  BackendError,
   BackendOutcomeUnknown,
+  type UnknownOperation,
   DEVNET_USDC_MINT,
   type HoldRequest,
 } from "../src/backend/types.js";
@@ -120,6 +122,11 @@ async function fixture() {
     lostConfirmation: false,
     returnedMismatch: false,
     status: "finalized",
+    historyAbsent: false,
+    blockHeight: 90n,
+    statusSlot: 45n,
+    accountContextSlot: 100n,
+    minContextSlots: [] as bigint[],
     chainError: null as unknown,
     simulationError: null as unknown,
     balance: 1_000_000_000n,
@@ -206,8 +213,12 @@ async function fixture() {
               case "getAccountInfo": {
                 clock.writeBigInt64LE(BigInt(f.now), 32);
                 expect(args[1]).toMatchObject({ commitment: "finalized" });
+                const minimum = (args[1] as { minContextSlot?: bigint })
+                  .minContextSlot;
+                if (minimum !== undefined) f.minContextSlots.push(minimum);
                 const a = accounts.get(args[0] as string);
                 return {
+                  context: { slot: f.accountContextSlot },
                   value: a
                     ? { ...a, data: [a.data.toString("base64"), "base64"] }
                     : null,
@@ -236,10 +247,20 @@ async function fixture() {
                 if (f.lostSend) throw Error("lost after execution");
                 return f.returnedMismatch ? "wrong" : sig;
               }
+              case "getEpochInfo":
+                return { blockHeight: f.blockHeight, absoluteSlot: 50n };
               case "getSignatureStatuses":
                 if (f.lostConfirmation) throw Error("lost status");
                 return {
-                  value: [{ confirmationStatus: f.status, err: f.chainError }],
+                  value: f.historyAbsent
+                    ? [null]
+                    : [
+                        {
+                          confirmationStatus: f.status,
+                          err: f.chainError,
+                          slot: f.statusSlot,
+                        },
+                      ],
                 };
               default:
                 throw Error(`Unexpected RPC ${method}`);
@@ -482,14 +503,22 @@ test.each([
   expect(f.backend.pendingOperation).toBe(e);
   await expect(
     f.backend.hold(req({ salt: "bb".repeat(32) })),
-  ).rejects.toBeInstanceOf(BackendOutcomeUnknown);
+  ).rejects.toMatchObject({
+    name: "BackendError",
+    code: "reconciliation_required",
+    phase: "validation",
+  });
   await expect(
     f.backend.release({
       holdId: e.holdId,
       expectedHeld: 1_000_000n,
       expectedRefundable: 0n,
     }),
-  ).rejects.toBeInstanceOf(BackendOutcomeUnknown);
+  ).rejects.toMatchObject({
+    name: "BackendError",
+    code: "reconciliation_required",
+    phase: "validation",
+  });
   expect(f.sent).toHaveLength(1);
   expect(f.calls.filter((c) => c === "getLatestBlockhash")).toHaveLength(1);
   expect((await f.backend.getStatus(e.holdId))!.held).toBe(1_000_000n);
@@ -679,7 +708,11 @@ test("lost capture retains the original amount and guards, blocks all later writ
       expectedHeld: 400_000n,
       expectedRefundable: 600_000n,
     }),
-  ).rejects.toBeInstanceOf(BackendOutcomeUnknown);
+  ).rejects.toMatchObject({
+    name: "BackendError",
+    code: "reconciliation_required",
+    phase: "validation",
+  });
   expect(f.sent).toHaveLength(2);
 });
 test("failure to persist finalized observation keeps the pending latch", async () => {
@@ -696,4 +729,292 @@ test("failure to persist finalized observation keeps the pending latch", async (
   );
   expect(backend.pendingOperation).toBeDefined();
   expect(f.sent).toHaveLength(1);
+});
+
+async function uncertainHold(): Promise<UnknownOperation> {
+  f.lostSend = true;
+  await expect(open()).rejects.toBeInstanceOf(BackendOutcomeUnknown);
+  f.lostSend = false;
+  return f.backend.pendingOperation!;
+}
+
+test("concurrent holds never report another operation's UNKNOWN evidence", async () => {
+  const results = await Promise.allSettled([
+    f.backend.hold(req()),
+    f.backend.hold(req({ salt: "bb".repeat(32) })),
+  ]);
+  expect(results[0].status).toBe("fulfilled");
+  expect(results[1]).toMatchObject({
+    status: "rejected",
+    reason: { name: "BackendError", code: "backend_busy", phase: "validation" },
+  });
+  const error = (results[1] as PromiseRejectedResult).reason;
+  expect(error).not.toBeInstanceOf(BackendOutcomeUnknown);
+  expect(error.evidence).toBeUndefined();
+  expect(f.sent).toHaveLength(1);
+  expect(f.calls.filter((c) => c === "getLatestBlockhash")).toHaveLength(1);
+});
+test("per-call onPrepared persists exact wire before submission and is awaited", async () => {
+  let resume!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  let ready!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    ready = resolve;
+  });
+  let prepared: UnknownOperation | undefined;
+  const call = f.backend.hold(req(), {
+    onPrepared: async (p) => {
+      expect(f.sent).toHaveLength(0);
+      expect(p.txSig).toBe(p.signature);
+      expect(p.holdId).toBeTruthy();
+      expect(p.lastValidBlockHeight).toBe("100");
+      prepared = p;
+      ready();
+      await blocked;
+    },
+  });
+  await entered;
+  await code(f.backend.hold(req({ salt: "bb".repeat(32) })), "backend_busy");
+  expect(f.sent).toHaveLength(0);
+  resume();
+  const receipt = await call;
+  expect(receipt.txSig).toBe(prepared!.signature);
+  expect(f.sent).toEqual([prepared!.signedTransaction]);
+});
+test("onPrepared failure prevents send and releases the mutex", async () => {
+  await code(
+    f.backend.hold(req(), {
+      onPrepared: () => {
+        throw Error("journal fsync failed");
+      },
+    }),
+    "evidence_unavailable",
+  );
+  expect(f.sent).toHaveLength(0);
+  expect(f.backend.pendingOperation).toBeUndefined();
+  await open();
+  expect(f.sent).toHaveLength(1);
+});
+test("each mutation invokes its per-call hook before sending", async () => {
+  const holdId = await open(),
+    seen: string[] = [];
+  const options = {
+    onPrepared: (p: UnknownOperation) => {
+      expect(f.sent).toHaveLength(seen.length + 1);
+      seen.push(p.operation);
+    },
+  };
+  await f.backend.capture(
+    {
+      holdId,
+      amount: 600_000n,
+      releaseRemainder: false,
+      expectedHeld: 1_000_000n,
+      expectedRefundable: 0n,
+    },
+    options,
+  );
+  await f.backend.release(
+    { holdId, expectedHeld: 400_000n, expectedRefundable: 600_000n },
+    options,
+  );
+  await f.backend.refund(
+    {
+      holdId,
+      amount: 200_000n,
+      expectedHeld: 0n,
+      expectedRefundable: 600_000n,
+    },
+    options,
+  );
+  expect(seen).toEqual(["capture", "release", "refund"]);
+});
+test("finalized original success reconciles the latch without resubmission", async () => {
+  const evidence = await uncertainHold();
+  const result = await f.backend.getTxOutcome(evidence);
+  expect(result).toMatchObject({
+    status: "landed",
+    terminal: true,
+    signature: evidence.signature,
+    transactionError: null,
+    payment: { held: 1_000_000n },
+  });
+  expect(f.backend.pendingOperation).toBeUndefined();
+  expect(f.sent).toHaveLength(1);
+  await f.backend.hold(req({ salt: "bb".repeat(32) }));
+  expect(f.sent).toHaveLength(2);
+});
+test("finalized original failure clears the latch", async () => {
+  f.chainError = { InstructionError: [0, "InvalidArgument"] };
+  const e = await uncertainHold();
+  expect(await f.backend.getTxOutcome(e)).toMatchObject({
+    status: "failed",
+    terminal: true,
+    transactionError: f.chainError,
+    payment: null,
+  });
+  expect(f.backend.pendingOperation).toBeUndefined();
+  expect(f.sent).toHaveLength(1);
+});
+test.each([false, true])(
+  "missing history stays unresolved even after expiry=%s and matching payment",
+  async (expired) => {
+    const e = await uncertainHold();
+    f.historyAbsent = true;
+    f.blockHeight = expired ? 101n : 100n;
+    expect(await f.backend.getTxOutcome(e)).toMatchObject({
+      status: "not_found",
+      terminal: false,
+      expired,
+      payment: { held: 1_000_000n },
+    });
+    await code(
+      f.backend.hold(req({ salt: "bb".repeat(32) })),
+      "reconciliation_required",
+    );
+    expect(f.sent).toHaveLength(1);
+  },
+);
+test("expiry and account absence alone do not erase original UNKNOWN", async () => {
+  const e = await uncertainHold();
+  f.historyAbsent = true;
+  f.blockHeight = 101n;
+  f.accounts.delete(e.holdId);
+  expect(await f.backend.getTxOutcome(e)).toMatchObject({
+    status: "not_found",
+    terminal: false,
+    expired: true,
+    payment: null,
+  });
+  expect(f.backend.pendingOperation?.signature).toBe(e.signature);
+});
+test("confirmed-only failure remains pending", async () => {
+  const e = await uncertainHold();
+  f.status = "confirmed";
+  f.chainError = { InstructionError: [0, "InvalidArgument"] };
+  f.blockHeight = 101n;
+  expect(await f.backend.getTxOutcome(e)).toMatchObject({
+    status: "pending",
+    terminal: false,
+    expired: true,
+  });
+  expect(f.backend.pendingOperation?.signature).toBe(e.signature);
+});
+test("restart recovery imports original evidence and keeps it on RPC failure", async () => {
+  const e = await uncertainHold();
+  const restored = new Capture402Backend(f.config, { rpc: f.rpc });
+  f.failRead = true;
+  await code(restored.getTxOutcome(e), "rpc_unavailable");
+  expect(restored.pendingOperation?.signature).toBe(e.signature);
+  await code(
+    restored.hold(req({ salt: "bb".repeat(32) })),
+    "reconciliation_required",
+  );
+  f.failRead = false;
+  expect(await restored.getTxOutcome(e)).toMatchObject({
+    status: "landed",
+    terminal: true,
+  });
+  expect(restored.pendingOperation).toBeUndefined();
+  expect(f.sent).toHaveLength(1);
+});
+test("unrelated or tampered evidence cannot reconcile the original reservation", async () => {
+  const e = await uncertainHold();
+  for (const changed of [
+    { holdId: addr(70) },
+    { signature: "invalid" },
+    { salt: "bb".repeat(32) },
+    { programId: addr(70) },
+    { lastValidBlockHeight: "0" },
+    { amount: "1" },
+  ]) {
+    await code(
+      f.backend.getTxOutcome({ ...e, ...changed }),
+      "invalid_evidence",
+    );
+    expect(f.backend.pendingOperation?.signature).toBe(e.signature);
+  }
+  const reordered = Object.fromEntries(
+    Object.entries(e).reverse(),
+  ) as unknown as UnknownOperation;
+  expect(await f.backend.getTxOutcome(reordered)).toMatchObject({
+    status: "landed",
+    terminal: true,
+  });
+});
+
+test.each(["capture", "release", "refund"] as const)(
+  "reconciliation binds original %s wire, signature and guards",
+  async (operation) => {
+    const holdId = await open();
+    if (operation === "refund")
+      await f.backend.capture({
+        holdId,
+        amount: 600_000n,
+        releaseRemainder: false,
+        expectedHeld: 1_000_000n,
+        expectedRefundable: 0n,
+      });
+    f.lostSend = true;
+    const call =
+      operation === "capture"
+        ? f.backend.capture({
+            holdId,
+            amount: 600_000n,
+            releaseRemainder: false,
+            expectedHeld: 1_000_000n,
+            expectedRefundable: 0n,
+          })
+        : operation === "release"
+          ? f.backend.release({
+              holdId,
+              expectedHeld: 1_000_000n,
+              expectedRefundable: 0n,
+            })
+          : f.backend.refund({
+              holdId,
+              amount: 200_000n,
+              expectedHeld: 400_000n,
+              expectedRefundable: 600_000n,
+            });
+    await expect(call).rejects.toBeInstanceOf(BackendOutcomeUnknown);
+    f.lostSend = false;
+    const original = f.backend.pendingOperation!,
+      sent = f.sent.length;
+    expect(await f.backend.getTxOutcome(original)).toMatchObject({
+      status: "landed",
+      terminal: true,
+      signature: original.signature,
+    });
+    expect(f.sent).toHaveLength(sent);
+    expect(f.backend.pendingOperation).toBeUndefined();
+  },
+);
+test("reconciliation snapshots are bounded by finalized signature slot and do not require today's spendability", async () => {
+  const e = await uncertainHold();
+  f.statusSlot = 60n;
+  f.accounts.delete(f.merchantAta);
+  expect(await f.backend.getTxOutcome(e)).toMatchObject({
+    status: "landed",
+    terminal: true,
+    payment: { held: 1_000_000n },
+  });
+  expect(f.minContextSlots).toContain(60n);
+  expect(f.sent).toHaveLength(1);
+});
+test("inconsistent finalized success with an absent persistent identity does not unlock writes", async () => {
+  const e = await uncertainHold();
+  f.accounts.delete(e.holdId);
+  await code(f.backend.getTxOutcome(e), "invalid_payment");
+  expect(f.backend.pendingOperation?.signature).toBe(e.signature);
+  expect(f.sent).toHaveLength(1);
+});
+
+test("a stale account response cannot unlock a finalized reconciliation", async () => {
+  const e = await uncertainHold();
+  f.accountContextSlot = 1n;
+  await code(f.backend.getTxOutcome(e), "rpc_unavailable");
+  expect(f.backend.pendingOperation?.signature).toBe(e.signature);
 });
