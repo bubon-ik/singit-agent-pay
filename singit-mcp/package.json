@@ -6,7 +6,7 @@
   "type": "module",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=20"
+    "node": "^20.0.0 || ^22.0.0 || >=24.0.0"
   },
   "bin": {
     "singit-mcp": "dist/index.js"
