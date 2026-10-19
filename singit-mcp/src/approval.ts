@@ -9,12 +9,14 @@ const VERSION = "singit-dispute-v1";
 
 export interface ApprovalDecision {
   disputeId: string;
-  outcome: string;
-  refundAmount: bigint;
+  outcome: "refund" | "reject" | string;
+  /** Base units. Ignored (treated as 0) for "reject". Accepts bigint or a base-unit string. */
+  refundAmount?: bigint | string;
 }
 
 function message(decision: ApprovalDecision): string {
-  return `${VERSION}|${decision.disputeId}|${decision.outcome}|${decision.refundAmount}`;
+  const amount = decision.outcome === "reject" ? 0n : BigInt(decision.refundAmount ?? 0n);
+  return `${VERSION}|${decision.disputeId}|${decision.outcome}|${amount}`;
 }
 
 export function issueApprovalToken(secret: string, decision: ApprovalDecision): string {
@@ -23,6 +25,7 @@ export function issueApprovalToken(secret: string, decision: ApprovalDecision): 
 
 export function verifyApprovalToken(secret: string, decision: ApprovalDecision, token: string): boolean {
   const expected = Buffer.from(issueApprovalToken(secret, decision), "hex");
+  if (!/^[0-9a-f]{64}$/i.test(token)) return false;
   const actual = Buffer.from(token, "hex");
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }

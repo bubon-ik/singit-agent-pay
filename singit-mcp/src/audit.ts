@@ -1,7 +1,9 @@
 /**
- * Audit log schema. STABLE: the demo dashboard consumes it. Add fields only; never rename or remove.
+ * Audit log schema — STABLE v1. The demo dashboard consumes it. Add fields only; never rename or remove.
  * Built from MCP events + backend tx signatures (capture402 emits no program logs, QA L-2).
  */
+
+/** Action names are exactly the MCP tool names (tool `hold` -> action "hold"). */
 
 /** Refusal codes returned by tools and recorded in the audit log (`code`). */
 export const RefusalCodes = [
@@ -38,7 +40,11 @@ export type AuditAction =
   | "open_dispute"
   | "resolve_dispute";
 
+export const AUDIT_SCHEMA_VERSION = 1 as const;
+
 export interface AuditEntry {
+  /** Schema version, always 1 for this shape. */
+  v: typeof AUDIT_SCHEMA_VERSION;
   /** 1, 2, 3 ... in order of recording. */
   seq: number;
   /** ISO 8601 UTC. */

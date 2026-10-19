@@ -12,7 +12,7 @@ import {
   type HoldRequest,
   type PaymentBackend,
 } from "./backend/types.js";
-import type { AuditAction, AuditEntry, RefusalCode } from "./audit.js";
+import { AUDIT_SCHEMA_VERSION, type AuditAction, type AuditEntry, type RefusalCode } from "./audit.js";
 
 export const MAX_HOLD_SECONDS = 7 * 86400;
 export const MIN_REFUND_WINDOW_SECONDS = 3600;
@@ -46,7 +46,10 @@ export interface Hold {
   refunded: bigint;
   captureDeadline: number;
   refundDeadline: number;
+  /** All tx signatures for this hold, oldest first (devnet signatures, or mock ids). */
   txSigs: string[];
+  /** Signature of the most recent tx on this hold (for explorer links). */
+  lastTxSig: string | null;
   disputeId?: string;
 }
 
@@ -183,6 +186,7 @@ export class PaymentService {
     } = {},
   ): void {
     this.auditLog.push({
+      v: AUDIT_SCHEMA_VERSION,
       seq: ++this.auditSeq,
       ts: new Date(this.now() * 1000).toISOString(),
       actor,
@@ -207,6 +211,16 @@ export class PaymentService {
     if (!mandate) throw new Refusal("MANDATE_NOT_FOUND", `BLOCKED: mandate not found: ${id}`);
     const holds = [...this.holds.values()].filter((h) => h.mandateId === id);
     return { mandate, remaining: mandate.totalBudget - mandate.committed, holds };
+  }
+
+  listMandates(): Array<{ mandate: Mandate; remaining: bigint; holds: Hold[] }> {
+    return [...this.mandates.keys()].map((id) => this.getMandate(id));
+  }
+
+  listDisputes(args: { status?: "open" | "resolved"; mandateId?: string } = {}): Dispute[] {
+    return [...this.disputes.values()].filter(
+      (d) => (args.status === undefined || d.status === args.status) && (args.mandateId === undefined || d.mandateId === args.mandateId),
+    );
   }
 
   getHold(id: string): Hold {
@@ -392,6 +406,7 @@ export class PaymentService {
         captureDeadline: dc,
         refundDeadline: dr,
         txSigs: [txSig],
+        lastTxSig: txSig,
       };
       this.holds.set(hold.id, hold);
       this.record("hold", actor, "ok", null, `hold ${formatUsdc(amount)} on mandate ${mandateId} for payee ${payee}`, {
@@ -440,6 +455,7 @@ export class PaymentService {
       const receipt = await this.backend.capture({ holdId, amount, releaseRemainder: !!releaseRemainder, expectedHeld, expectedRefundable });
       txSig = receipt.txSig;
       hold.txSigs.push(txSig);
+      hold.lastTxSig = txSig;
       hold.held -= amount;
       hold.captured += amount;
 
@@ -490,6 +506,7 @@ export class PaymentService {
       const receipt = await this.backend.release({ holdId, expectedHeld, expectedRefundable });
       txSig = receipt.txSig;
       hold.txSigs.push(txSig);
+      hold.lastTxSig = txSig;
 
       const released = hold.held;
       hold.held = 0n;
@@ -541,6 +558,7 @@ export class PaymentService {
       const receipt = await this.backend.refund({ holdId, amount, expectedHeld, expectedRefundable });
       txSig = receipt.txSig;
       hold.txSigs.push(txSig);
+      hold.lastTxSig = txSig;
       hold.refunded += amount;
 
       this.record("refund", actor, "ok", null, `refunded ${formatUsdc(amount)} on hold ${holdId}`, {
@@ -653,7 +671,17 @@ export class PaymentService {
         return dispute;
       }
 
-      // outcome === "refund": release what is still held, then refund up to captured-refunded.
+      // outcome === "refund": validate first, then release what is still held, then refund.
+      const requested = refundAmount ?? 0n;
+      if (requested < 0n || requested > hold.captured - hold.refunded) {
+        throw new Refusal(
+          "REFUND_EXCEEDS_CAPTURED",
+          `BLOCKED: refund ${formatUsdc(requested)} exceeds refundable ${formatUsdc(hold.captured - hold.refunded)} on hold ${hold.id}`,
+        );
+      }
+      if (requested > 0n && this.now() >= hold.refundDeadline) {
+        throw new Refusal("REFUND_DEADLINE_PASSED", `BLOCKED: refund deadline passed for hold ${hold.id}`);
+      }
       let releaseTxSig: string | null = null;
       let refundTxSig: string | null = null;
       if (hold.held > 0n) {
@@ -662,6 +690,7 @@ export class PaymentService {
         const receipt = await this.backend.release({ holdId: hold.id, expectedHeld, expectedRefundable });
         releaseTxSig = receipt.txSig;
         hold.txSigs.push(releaseTxSig);
+      hold.lastTxSig = releaseTxSig;
         dispute.txSigs.push(releaseTxSig);
         const released = hold.held;
         hold.held = 0n;
@@ -680,6 +709,7 @@ export class PaymentService {
         const receipt = await this.backend.refund({ holdId: hold.id, amount, expectedHeld, expectedRefundable });
         refundTxSig = receipt.txSig;
         hold.txSigs.push(refundTxSig);
+      hold.lastTxSig = refundTxSig;
         dispute.txSigs.push(refundTxSig);
         hold.refunded += amount;
       }
