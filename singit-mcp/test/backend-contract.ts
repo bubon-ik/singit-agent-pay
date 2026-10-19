@@ -6,7 +6,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { beforeEach, describe, expect, test } from "vitest";
-import { BackendError, DEVNET_USDC_MINT, type PaymentBackend } from "../src/backend/types.js";
+import { BackendError, DEVNET_USDC_MINT, type PaymentBackend, type PreparedTx } from "../src/backend/types.js";
 import { PaymentService } from "../src/service.js";
 
 export interface ContractFixture {
@@ -66,6 +66,7 @@ export function runBackendContract(
 
     async function openHold(maximum: bigint = fx.unit) {
       const { captureDeadline, refundDeadline } = deadlines();
+      let prepared: PreparedTx | undefined;
       const receipt = await fx.backend.hold({
         payer: fx.payer,
         mint: DEVNET_USDC_MINT,
@@ -74,8 +75,8 @@ export function runBackendContract(
         captureDeadline,
         refundDeadline,
         salt: salt(),
-      });
-      return { receipt, captureDeadline, refundDeadline };
+      }, { onPrepared: (p) => { prepared = p; } });
+      return { receipt, prepared, captureDeadline, refundDeadline };
     }
 
     test(
@@ -375,7 +376,7 @@ export function runBackendContract(
             },
           },
         );
-        // onPrepared is optional: Capture402Backend may omit it; MockBackend implements it.
+        // Backends without transaction preparation may omit the hook.
         if (prepared.length === 0) {
           ctx.skip();
           return;
@@ -388,7 +389,7 @@ export function runBackendContract(
     );
 
     test(
-      "m. getTxOutcome (only when the backend implements it): executed for a real hold txSig, not_found for an unknown signature",
+      "m. getTxOutcome: executed for a prepared hold, no success/failure proof for an unknown signature",
       async (ctx) => {
         const backend = fx.backend;
         const getTxOutcome = backend.getTxOutcome;
@@ -396,12 +397,13 @@ export function runBackendContract(
           ctx.skip();
           return;
         }
-        const { receipt } = await openHold();
-        const outcome = await getTxOutcome.call(backend, { kind: "hold", txSig: receipt.txSig, holdId: receipt.holdId, payer: fx.payer });
+        const { receipt, prepared } = await openHold();
+        const outcome = await getTxOutcome.call(backend, { kind: "hold", txSig: receipt.txSig, holdId: receipt.holdId, payer: fx.payer, evidence: prepared?.evidence });
         expect(outcome.status).toBe("executed");
 
         const unknown = await getTxOutcome.call(backend, { kind: "hold", txSig: "not-a-real-signature-ever-issued", holdId: null, payer: fx.payer });
-        expect(unknown.status).toBe("not_found");
+        // The in-memory mock can establish absence; a chain backend must retain uncertainty.
+        expect(["not_found", "pending"]).toContain(unknown.status);
       },
       timeout,
     );

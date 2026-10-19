@@ -4,8 +4,8 @@ This backend is for a **trusted local devnet service with separate throwaway key
 It is implemented and tested offline. No live signing, RPC request, funding,
 deployment, devnet acceptance or full MCP E2E is established by local tests.
 The direct smoke and contract suite require separate explicit owner authorization
-before live execution. Do not run a live MCP service until the PaymentService
-persistence/reservation work below is reviewed and implemented.
+before live execution. Live MCP use still requires review of the configured durable
+store, startup restoration of unresolved evidence and the acceptance gates below.
 
 ## ABI and provenance
 
@@ -127,10 +127,46 @@ The receipt shapes in PaymentBackend are unchanged. The compatible error extensi
 
 Success requires the original signature at `finalized` with `err === null`.
 `sendTransaction` uses `maxRetries: 0`. No salt, blockhash or signed message is
-regenerated after a possible send. The backend instance blocks all further writes
-when UNKNOWN and allows read-only observation; `pendingOperation` exposes its
-volatile evidence. There is deliberately no reset/retry method. This volatile
-latch does not survive process recreation and is **not durable retry safety**.
+regenerated after a possible send. The backend protects one write/reconciliation at a time per instance. Overlapping
+calls get validation-phase `backend_busy` without another call's evidence. New
+writes while an original operation remains unresolved get validation-phase
+`reconciliation_required`; only the original possibly sent call raises UNKNOWN.
+`pendingOperation` exposes the original immutable evidence.
+
+`getTxOutcome(originalEvidence)` validates the original signed wire and returns
+`landed`, `failed`, `pending` or `not_found`, plus `terminal`, `expired`, finalized
+block height and a verified Payment snapshot. It clears the latch only for the
+original signature finalized with known err. Signature history missing, expiry,
+and matching/changed/absent Payment state alone never prove the original failed.
+The snapshot is bounded by the observed finalized epoch/status slot through
+`minContextSlot`; present-day token-account spendability is not payment history.
+Reconciliation does not send or sign anything. A persistence error keeps the
+latch. There is no reset/retry method. After restart the caller must load durable
+pending evidence and call reconciliation before admitting a new write; construction
+alone is **not durable retry safety**. [Solana's RPC documentation](https://solana.com/docs/rpc/http/getsignaturestatuses)
+describes the history search; [getTransaction](https://solana.com/docs/rpc/http/gettransaction)
+explicitly permits null when a transaction is not found at the requested commitment.
+
+Each economic method also accepts per-call `{onPrepared: async prepared => ...}`.
+The `SubmitContext` hook receives `PreparedTx`: `txSig`, PDA/holdId, a safe numeric
+`lastValidBlockHeight` and nested `evidence` retaining the original signature,
+salt, amount/guards, wire and string lifetime. Its failure prevents send.
+PaymentService journals the complete prepared object, and `OperationRecord`
+retains it across JSON storage/reload. Reconciliation forwards `prepared.evidence`
+in the main-compatible `TxOutcomeQuery`. This adapter returns `executed` only for
+original finalized success, `failed` only for original finalized error, and
+`pending` for missing history or a legacy journal without its original wire.
+It never returns a terminal `not_found` to PaymentService. The direct evidence
+overload above retains its richer observations. The synchronous factory does not
+silently create or restore a durable journal for the live MCP path.
+
+HTTP and dashboard state expose an explicit public operation view. Prepared
+metadata includes only `txSig`, `holdId` and `lastValidBlockHeight`; signed wires,
+full evidence, salt and idempotency keys stay in the private journal. Redaction
+applies before send and in pending, UNKNOWN, succeeded and failed states, including
+after a retention hook rejects. Reading public state never alters the private
+evidence used for restart recovery or reconciliation. The dashboard also redacts
+records received from an older upstream before caching or publishing them.
 
 The optional `retainBeforeSend(evidence)` dependency runs before any possible
 submission; a sink failure prevents sending. The two live scripts use exclusive
@@ -145,16 +181,14 @@ until an independently reviewed reconciliation determines the original outcome.
 Do not rerun a suite, refresh blockhash, generate another salt, switch provider,
 remove evidence, or automatically void/refund to compensate for UNKNOWN.
 
-**PaymentService remains a blocker for safe live MCP use:** it has no durable
-operation journal or mandate reservation before authorize, serial concurrency
-control, restart recovery or reconciliation. Its existing `toRefusal` only maps
-BackendError; the new UNKNOWN type must be handled explicitly by service/MCP
-callers, persisted with original identity/wire, and exposed as a distinct pending
-outcome rather than a blocked payment or retry suggestion. Preserve reservations
-across UNKNOWN and failed post-send status reads. Hold's current wrong-mint
-cleanup/budget-restoration path must not release a reservation without proven
-finalized effects. Dispute resolution's multi-step void/refund also needs separate
-durable steps. Do not claim these are fixed by this backend implementation.
+**Remaining live MCP acceptance gates:** current main supplies PaymentService's
+operation journal, reservations, write serialization and UNKNOWN handling. This
+branch connects that API to the real backend and tests all four operations through
+a durable offline restart. The live entrypoint must still select a private durable
+store and restore/reconcile every pending record before admitting new writes;
+the factory and default in-memory service do not establish those startup gates.
+Review multi-process custody, post-send persistence failures and dispute cleanup
+separately. Local compatibility and mock MCP E2E are not live economic acceptance.
 
 ## Local checks
 

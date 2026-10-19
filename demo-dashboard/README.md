@@ -80,6 +80,8 @@ Real Solana signatures are linked to the devnet explorer. Mock transaction refer
 
 The Operations card appears only when `/api/state` includes an `ops` array. Pending operations show an amber spinner; unknown outcomes show orange “OUTCOME UNKNOWN — funds reserved, reconciling”. Mandates show “reserved X USDC (pending)” for active reservations, which are already included in `committed`. Refusal codes `OPERATION_UNKNOWN` / `OPERATION_PENDING` and `OUTCOME_UNKNOWN` / reconcile audit rows use amber or orange styling instead of red. Run `npm run test:unit` for the offline unit tests.
 
+Operations are public status projections for both in-process and remote sources. Prepared metadata includes only `txSig`, `holdId` and `lastValidBlockHeight`; full prepared evidence and signed wires remain in the service's private journal. The bridge redacts older upstream records before caching them and projects every operation again when serving a snapshot.
+
 ## Screenshots
 
 `scripts/screenshot.sh` boots the bridge on a spare port and walks the full 13-step story in presenter mode, capturing:

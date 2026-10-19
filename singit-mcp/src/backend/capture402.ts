@@ -9,6 +9,11 @@ import {
   createKeyPairSignerFromBytes,
   createSolanaRpc,
   createTransactionMessage,
+  decompileTransactionMessage,
+  getCompiledTransactionMessageDecoder,
+  getTransactionDecoder,
+  getPublicKeyFromAddress,
+  verifySignature,
   getAddressDecoder,
   getBase64Decoder,
   getBase64EncodedWireTransaction,
@@ -24,6 +29,7 @@ import {
 import {
   ata,
   decodePayment,
+  decodeInstructionData,
   paymentAddress,
   PAYMENT_LEN,
   TOKEN_PROGRAM_ADDRESS,
@@ -42,6 +48,10 @@ import {
   BackendError,
   BackendOutcomeUnknown,
   DEVNET_USDC_MINT,
+  type BackendTxOutcome,
+  type SubmitContext,
+  type TxOutcome,
+  type TxOutcomeQuery,
   type CaptureRequest,
   type EscrowStatus,
   type HoldReceipt,
@@ -62,6 +72,21 @@ const CLOCK = address("SysvarC1ock11111111111111111111111111111111");
 const SYSVAR = address("Sysvar1111111111111111111111111111111111111");
 const COMMITMENT = "finalized" as const;
 const rpcOptions = () => ({ abortSignal: AbortSignal.timeout(15_000) });
+const evidenceFields = [
+  "operation",
+  "holdId",
+  "salt",
+  "amount",
+  "expectedHeld",
+  "expectedRefundable",
+  "signature",
+  "signedTransaction",
+  "blockhash",
+  "lastValidBlockHeight",
+  "programId",
+  "genesisHash",
+  "abiCommit",
+] as const;
 export type Capture402Rpc = ReturnType<typeof createSolanaRpc>;
 
 type Account = {
@@ -208,6 +233,7 @@ export class Capture402Backend implements PaymentBackend {
   private readonly programData: Address;
   private readonly loadSigner: typeof loadDevnetSigner;
   private uncertain?: UnknownOperation;
+  private busy = false;
   private readonly retainBeforeSend?: Capture402Dependencies["retainBeforeSend"];
   private readonly retainFinalized?: Capture402Dependencies["retainFinalized"];
 
@@ -259,7 +285,25 @@ export class Capture402Backend implements PaymentBackend {
   }
 
   private writable(): void {
-    if (this.uncertain) throw new BackendOutcomeUnknown(this.uncertain);
+    if (this.uncertain)
+      throw new BackendError(
+        "reconciliation_required",
+        "An original operation is unresolved; reconcile it before another write",
+      );
+  }
+
+  private async exclusive<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.busy)
+      throw new BackendError(
+        "backend_busy",
+        "Another operation is already running; this call sent nothing",
+      );
+    this.busy = true;
+    try {
+      return await operation();
+    } finally {
+      this.busy = false;
+    }
   }
   private async read<T>(fn: () => Promise<T>): Promise<T> {
     try {
@@ -272,11 +316,29 @@ export class Capture402Backend implements PaymentBackend {
       );
     }
   }
-  private async account(id: Address): Promise<Account | null> {
+  private async account(
+    id: Address,
+    minContextSlot?: bigint,
+  ): Promise<Account | null> {
     return this.read(async () => {
-      const { value } = await this.rpc
-        .getAccountInfo(id, { encoding: "base64", commitment: COMMITMENT })
+      const { value, context } = await this.rpc
+        .getAccountInfo(id, {
+          encoding: "base64",
+          commitment: COMMITMENT,
+          ...(minContextSlot === undefined ? {} : { minContextSlot }),
+        })
         .send(rpcOptions());
+      if (
+        minContextSlot !== undefined &&
+        (!context ||
+          typeof context.slot !== "bigint" ||
+          context.slot < minContextSlot)
+      ) {
+        throw new BackendError(
+          "rpc_unavailable",
+          "Account snapshot is behind the finalized reconciliation boundary",
+        );
+      }
       if (value === null) return null;
       if (!Array.isArray(value.data) || value.data[1] !== "base64")
         throw new BackendError("invalid_account", "Expected base64 account");
@@ -398,9 +460,13 @@ export class Capture402Backend implements PaymentBackend {
     return account.data.readBigUInt64LE(64);
   }
 
-  private async payment(holdId: string): Promise<Payment | null> {
+  private async payment(
+    holdId: string,
+    minContextSlot?: bigint,
+    requireSpendableAccounts = true,
+  ): Promise<Payment | null> {
     const id = key(holdId),
-      account = await this.account(id);
+      account = await this.account(id, minContextSlot);
     if (account === null) return null;
     const p = decodePayment(account.data);
     if (
@@ -428,6 +494,7 @@ export class Capture402Backend implements PaymentBackend {
         "On-chain deadlines cannot be represented exactly by backend interface",
       );
     }
+    if (!requireSpendableAccounts) return p;
     await this.token(p.payer);
     await this.token(p.server);
     if ((await this.token(id, true)) < p.held)
@@ -457,7 +524,14 @@ export class Capture402Backend implements PaymentBackend {
         };
   }
 
-  async hold(req: HoldRequest): Promise<HoldReceipt> {
+  hold(req: HoldRequest, options?: SubmitContext): Promise<HoldReceipt> {
+    return this.exclusive(() => this.holdOnce(req, options));
+  }
+
+  private async holdOnce(
+    req: HoldRequest,
+    options?: SubmitContext,
+  ): Promise<HoldReceipt> {
     this.writable();
     const payer = key(req.payer),
       server = key(req.payee);
@@ -542,12 +616,18 @@ export class Capture402Backend implements PaymentBackend {
     });
     return {
       holdId: payment,
-      ...(await this.submit(instruction, signer, rent, {
-        operation: "hold",
-        holdId: payment,
-        salt: req.salt,
-        amount: req.maximum.toString(),
-      })),
+      ...(await this.submit(
+        instruction,
+        signer,
+        rent,
+        {
+          operation: "hold",
+          holdId: payment,
+          salt: req.salt,
+          amount: req.maximum.toString(),
+        },
+        options,
+      )),
     };
   }
 
@@ -597,6 +677,7 @@ export class Capture402Backend implements PaymentBackend {
     operation: "capture" | "release" | "refund",
     amount?: bigint,
     releaseRemainder = false,
+    options?: SubmitContext,
   ): Promise<TxReceipt> {
     this.writable();
     key(req.holdId);
@@ -670,27 +751,275 @@ export class Capture402Backend implements PaymentBackend {
               req.expectedHeld,
               req.expectedRefundable,
             );
-    return this.submit(instruction, signer, 0n, {
-      operation,
-      holdId: req.holdId,
-      expectedHeld: req.expectedHeld.toString(),
-      expectedRefundable: req.expectedRefundable.toString(),
-      amount: amount?.toString(),
-    });
+    return this.submit(
+      instruction,
+      signer,
+      0n,
+      {
+        operation,
+        holdId: req.holdId,
+        expectedHeld: req.expectedHeld.toString(),
+        expectedRefundable: req.expectedRefundable.toString(),
+        amount: amount?.toString(),
+      },
+      options,
+    );
   }
 
-  capture(req: CaptureRequest): Promise<TxReceipt> {
+  capture(
+    req: CaptureRequest,
+    options?: SubmitContext,
+  ): Promise<TxReceipt> {
     if (typeof req.releaseRemainder !== "boolean")
       return Promise.reject(
         new BackendError("invalid_terms", "releaseRemainder must be boolean"),
       );
-    return this.mutation(req, "capture", req.amount, req.releaseRemainder);
+    return this.exclusive(() =>
+      this.mutation(req, "capture", req.amount, req.releaseRemainder, options),
+    );
   }
-  release(req: ReleaseRequest): Promise<TxReceipt> {
-    return this.mutation(req, "release");
+  release(
+    req: ReleaseRequest,
+    options?: SubmitContext,
+  ): Promise<TxReceipt> {
+    return this.exclusive(() =>
+      this.mutation(req, "release", undefined, false, options),
+    );
   }
-  refund(req: RefundRequest): Promise<TxReceipt> {
-    return this.mutation(req, "refund", req.amount);
+  refund(
+    req: RefundRequest,
+    options?: SubmitContext,
+  ): Promise<TxReceipt> {
+    return this.exclusive(() =>
+      this.mutation(req, "refund", req.amount, false, options),
+    );
+  }
+
+  /** Reconcile only the original signed operation, including after a process restart. */
+  getTxOutcome(query: TxOutcomeQuery): Promise<TxOutcome>;
+  getTxOutcome(evidence: UnknownOperation): Promise<BackendTxOutcome>;
+  async getTxOutcome(
+    query: TxOutcomeQuery | UnknownOperation,
+  ): Promise<TxOutcome | BackendTxOutcome> {
+    if (!("kind" in query)) return this.reconcileEvidence(query);
+    const evidence = query.evidence ?? this.uncertain;
+    // A legacy journal without the original wire cannot prove a terminal outcome.
+    if (!evidence) return { status: "pending" };
+    if (
+      query.kind !== evidence.operation ||
+      query.txSig !== evidence.signature ||
+      (query.holdId !== null && query.holdId !== evidence.holdId) ||
+      (query.salt !== undefined && query.salt !== evidence.salt) ||
+      (query.lastValidBlockHeight !== undefined &&
+        (!Number.isSafeInteger(query.lastValidBlockHeight) ||
+          String(query.lastValidBlockHeight) !== evidence.lastValidBlockHeight))
+    ) {
+      throw new BackendError("invalid_evidence", "Query differs from the original operation");
+    }
+    const result = await this.reconcileEvidence(evidence);
+    // PaymentService treats not_found as terminal. Missing RPC history is only pending here.
+    if (!result.terminal) return { status: "pending" };
+    return result.status === "landed"
+      ? { status: "executed", txSig: result.signature, holdId: evidence.holdId }
+      : { status: "failed", code: "transaction_failed" };
+  }
+
+  private reconcileEvidence(evidence: UnknownOperation): Promise<BackendTxOutcome> {
+    return this.exclusive(async () => {
+      await this.validateEvidence(evidence);
+      if (
+        this.uncertain &&
+        (this.uncertain.signature !== evidence.signature ||
+          this.uncertain.signedTransaction !== evidence.signedTransaction ||
+          evidenceFields.some(
+            (name) => evidence[name] !== this.uncertain![name],
+          ))
+      ) {
+        throw new BackendError(
+          "invalid_evidence",
+          "Evidence differs from the original unresolved operation",
+        );
+      }
+      // Import the durable reservation before reads; an RPC error must not unlock a restarted instance.
+      this.uncertain = Object.freeze({ ...evidence });
+      await this.environment();
+      const epoch = await this.read(() =>
+        this.rpc.getEpochInfo({ commitment: COMMITMENT }).send(rpcOptions()),
+      );
+      const { value } = await this.read(() =>
+        this.rpc
+          .getSignatureStatuses(
+            [
+              getSignatureFromTransaction(
+                getTransactionDecoder().decode(
+                  Buffer.from(evidence.signedTransaction, "base64"),
+                ),
+              ),
+            ],
+            { searchTransactionHistory: true },
+          )
+          .send(rpcOptions()),
+      );
+      if (!Array.isArray(value) || value.length !== 1)
+        throw new BackendError(
+          "rpc_unavailable",
+          "Malformed original signature response",
+        );
+      const status = value[0];
+      const finalized = status?.confirmationStatus === COMMITMENT;
+      if (
+        typeof epoch.blockHeight !== "bigint" ||
+        typeof epoch.absoluteSlot !== "bigint" ||
+        epoch.blockHeight < 0n ||
+        epoch.absoluteSlot < 0n ||
+        (finalized &&
+          (typeof status.slot !== "bigint" ||
+            !Object.hasOwn(status, "err") ||
+            status.err === undefined))
+      ) {
+        throw new BackendError(
+          "rpc_unavailable",
+          "Malformed reconciliation response; outcome remains unresolved",
+        );
+      }
+      const minimumSlot =
+        finalized && status.slot > epoch.absoluteSlot
+          ? status.slot
+          : epoch.absoluteSlot;
+      const p = await this.payment(evidence.holdId, minimumSlot, false);
+      const payment: EscrowStatus | null = p
+        ? {
+            holdId: evidence.holdId,
+            payer: p.payer,
+            payee: p.server,
+            mint: p.mint,
+            maximum: p.maximum,
+            held: p.held,
+            refundable: p.refundable,
+            captureDeadline: Number(p.captureDeadline),
+            refundDeadline: Number(p.refundDeadline),
+          }
+        : null;
+      if (finalized && status.err === null && !payment) {
+        throw new BackendError(
+          "invalid_payment",
+          "Finalized success has no persistent payment identity; retain reservation",
+        );
+      }
+      const result: BackendTxOutcome = {
+        status: finalized
+          ? status.err === null
+            ? "landed"
+            : "failed"
+          : status
+            ? "pending"
+            : "not_found",
+        signature: evidence.signature,
+        terminal: finalized,
+        expired: epoch.blockHeight > BigInt(evidence.lastValidBlockHeight),
+        blockHeight: epoch.blockHeight.toString(),
+        payment,
+        ...(finalized
+          ? { slot: status.slot.toString(), transactionError: status.err }
+          : {}),
+      };
+      if (finalized) {
+        // State/expiry are observations, never a substitute for original-signature finality.
+        try {
+          await this.retainFinalized?.(evidence, status.err);
+        } catch {
+          throw new BackendError(
+            "evidence_unavailable",
+            "Cannot retain finalized observation; reservation remains unresolved",
+          );
+        }
+        this.uncertain = undefined;
+      }
+      return result;
+    });
+  }
+
+  private async validateEvidence(e: UnknownOperation): Promise<void> {
+    try {
+      if (
+        e.programId !== this.program ||
+        e.genesisHash !== DEVNET_GENESIS_HASH ||
+        e.abiCommit !== CAPTURE402_ABI_COMMIT ||
+        !/^\d+$/.test(e.lastValidBlockHeight) ||
+        BigInt(e.lastValidBlockHeight) > U64_MAX
+      )
+        throw Error();
+      const tx = getTransactionDecoder().decode(
+        Buffer.from(e.signedTransaction, "base64"),
+      );
+      if (
+        getBase64EncodedWireTransaction(tx) !== e.signedTransaction ||
+        getSignatureFromTransaction(tx) !== e.signature
+      )
+        throw Error();
+      const message = getCompiledTransactionMessageDecoder().decode(
+        tx.messageBytes,
+      );
+      if (
+        message.version !== "legacy" ||
+        message.lifetimeToken !== e.blockhash ||
+        message.header.numSignerAccounts !== 1
+      )
+        throw Error();
+      const instructions = decompileTransactionMessage(message).instructions;
+      if (instructions.length !== 1) throw Error();
+      const ix = instructions[0],
+        data = decodeInstructionData(Uint8Array.from(ix.data ?? []));
+      if (ix.programAddress !== this.program || !data || data.op === "reclaim")
+        throw Error();
+      const expectedOp =
+        e.operation === "hold"
+          ? "authorize"
+          : e.operation === "release"
+            ? "void"
+            : e.operation;
+      if (
+        data.op !== expectedOp ||
+        ix.accounts?.[data.op === "authorize" ? 2 : 1]?.address !==
+          key(e.holdId) ||
+        ix.accounts?.[data.op === "authorize" ? 3 : 2]?.address !==
+          DEVNET_USDC_MINT
+      )
+        throw Error();
+      if (data.op === "authorize") {
+        if (
+          e.salt?.toLowerCase() !== Buffer.from(data.salt).toString("hex") ||
+          (e.amount !== undefined && e.amount !== data.maximum.toString()) ||
+          (await paymentAddress(
+            this.program,
+            message.staticAccounts[0],
+            data.salt,
+          )) !== e.holdId
+        )
+          throw Error();
+      } else if (
+        e.expectedHeld !== data.expectedHeld.toString() ||
+        e.expectedRefundable !== data.expectedRefundable.toString() ||
+        (data.op !== "void" && e.amount !== data.amount.toString())
+      )
+        throw Error();
+      const signer = message.staticAccounts[0],
+        signature = tx.signatures[signer];
+      if (
+        !signature ||
+        !(await verifySignature(
+          await getPublicKeyFromAddress(signer),
+          signature,
+          tx.messageBytes,
+        ))
+      )
+        throw Error();
+    } catch {
+      throw new BackendError(
+        "invalid_evidence",
+        "Evidence must describe the original signed Capture402 operation exactly",
+      );
+    }
   }
 
   private async submit(
@@ -706,6 +1035,7 @@ export class Capture402Backend implements PaymentBackend {
       | "expectedHeld"
       | "expectedRefundable"
     >,
+    options?: SubmitContext,
   ): Promise<TxReceipt> {
     this.writable();
     const { value: lifetime } = await this.read(() =>
@@ -777,6 +1107,16 @@ export class Capture402Backend implements PaymentBackend {
     // Reserve before possible send, including concurrent callers. Never clear on an ambiguous error.
     this.uncertain = evidence;
     try {
+      await options?.onPrepared?.(
+        Object.freeze({
+          txSig: evidence.signature,
+          holdId: evidence.holdId,
+          ...(Number.isSafeInteger(Number(evidence.lastValidBlockHeight))
+            ? { lastValidBlockHeight: Number(evidence.lastValidBlockHeight) }
+            : {}),
+          evidence,
+        }),
+      );
       await this.retainBeforeSend?.(evidence);
     } catch {
       this.uncertain = undefined;

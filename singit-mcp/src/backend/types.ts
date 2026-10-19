@@ -112,6 +112,8 @@ export interface PreparedTx {
   txSig: string;
   holdId?: string;
   lastValidBlockHeight?: number;
+  /** Exact original wire and identity for Capture402 reconciliation; retain privately. */
+  evidence?: UnknownOperation;
 }
 
 export interface SubmitContext {
@@ -126,6 +128,8 @@ export interface TxOutcomeQuery {
   /** hold only: used to derive the payment PDA when txSig is unknown. */
   salt?: string;
   lastValidBlockHeight?: number;
+  /** Exact original wire and identity for Capture402 reconciliation; retain privately. */
+  evidence?: UnknownOperation;
 }
 
 export type TxOutcome =
@@ -152,7 +156,7 @@ export interface PaymentBackend {
    * Optional. Resolves whether a money-moving call actually executed on-chain, for reconciling
    * an UNKNOWN op after a lost response / BackendOutcomeUnknown. If absent, the service keeps
    * the reservation and stays UNKNOWN until an external reconcile or same-key retry supplies
-   * evidence (signature status / account exists). Capture402Backend may omit this for now.
+   * evidence. Capture402 reports missing history as pending, never as retry authorization.
    */
   getTxOutcome?(q: TxOutcomeQuery): Promise<TxOutcome>;
 }
@@ -202,3 +206,18 @@ export class BackendOutcomeUnknown extends Error {
     this.name = "BackendOutcomeUnknown";
   }
 }
+
+/** Compatibility names; PaymentService uses SubmitContext and PreparedTx. */
+export type BackendWriteOptions = SubmitContext;
+export type PreparedOperation = PreparedTx;
+export type BackendTxOutcome = {
+  status: "landed" | "failed" | "pending" | "not_found";
+  signature: string;
+  /** True only for original-signature finalized evidence, never inferred from state/expiry. */
+  terminal: boolean;
+  expired: boolean;
+  blockHeight: string;
+  payment: EscrowStatus | null;
+  slot?: string;
+  transactionError?: unknown;
+};

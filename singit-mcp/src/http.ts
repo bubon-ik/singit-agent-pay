@@ -9,6 +9,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { AmountError, parseUsdc } from "./amount.js";
 import { issueApprovalToken } from "./approval.js";
 import { createRateLimiter } from "./ratelimit.js";
+import { publicOperation } from "./public-state.js";
 import { createMcpServer } from "./server.js";
 import { PaymentService, Refusal } from "./service.js";
 
@@ -117,7 +118,7 @@ export function createHttpHandler(opts: HttpHandlerOptions): (req: IncomingMessa
     sendJson(
       res,
       200,
-      { v: 1, backend: backendName, mandates, disputes: service.listDisputes(), audit: service.listAuditLog(), holds, ops: service.listOperations() },
+      { v: 1, backend: backendName, mandates, disputes: service.listDisputes(), audit: service.listAuditLog(), holds, ops: service.listOperations().map(publicOperation) },
       { "Access-Control-Allow-Origin": "*" },
     );
   }

@@ -978,7 +978,7 @@ export class PaymentService {
     const prevState = op.state;
     const kind = RECONCILE_KIND[op.action];
 
-    // getTxOutcome is optional (Capture402Backend does not implement it yet): without it there
+    // getTxOutcome is optional: without it there
     // is no evidence source to converge against, so the op simply stays pending/unknown until a
     // same-idempotencyKey retry supplies a terminal result, or a future backend adds it.
     if (!this.backend.getTxOutcome) return op;
@@ -992,6 +992,7 @@ export class PaymentService {
         payer: this.payerForOp(op),
         salt: op.salt,
         lastValidBlockHeight: op.prepared?.lastValidBlockHeight,
+        evidence: op.prepared?.evidence,
       });
     } catch {
       return op; // read error: stays pending/unknown, caller can retry later
@@ -1122,12 +1123,14 @@ export class PaymentService {
     return entries.slice();
   }
 
+  /** Private journal record, including original signed evidence. Redact at transport boundaries. */
   getOperation(id: string): OperationRecord {
     const op = this.ops.get(id);
     if (!op) throw new Refusal("INVALID_INPUT", `BLOCKED: unknown operation ${id}`);
     return op;
   }
 
+  /** Private journal records. HTTP/dashboard callers must project public status fields. */
   listOperations(args: { state?: OpState; mandateId?: string; holdId?: string } = {}): OperationRecord[] {
     return [...this.ops.values()].filter(
       (o) =>

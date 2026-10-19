@@ -8,6 +8,7 @@
 import { appendFileSync, chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import type { AuditEntry, RefusalCode } from "./audit.js";
+import type { PreparedTx } from "./backend/types.js";
 
 export interface StoredMandate {
   id: string;
@@ -82,7 +83,7 @@ export interface OperationRecord {
   /** hold only: capture402 payment PDA = PDA(payer, salt). */
   salt?: string;
   /** Filled via ctx.onPrepared before the backend sends the tx. */
-  prepared?: { txSig: string; holdId?: string; lastValidBlockHeight?: number };
+  prepared?: PreparedTx;
   /** On-chain held/refundable this op should produce once it lands (capture/release/refund/cleanup_release). */
   expected?: { held: string; refundable: string };
   state: OpState;
