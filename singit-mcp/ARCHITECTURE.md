@@ -65,7 +65,13 @@ sequenceDiagram
 
 Every call, whether executed or **blocked**, writes an audit row: actor, action, outcome, code, reason, amounts, `txSig`, held/refundable after.
 
+## Known limitations (hackathon scope)
+
+- **State is in memory.** Mandates, holds, disputes and the audit log live in the `PaymentService` process; a restart (or mock `/human/reset`) clears them. Fine for the demo; production needs a durable, append-only audit store. On capture402 the escrow state itself survives on-chain, but our audit rows (the program emits no logs, QA L-2) do not.
+- **Single process, single merchant/payer key pair** per backend instance; no multi-tenant key management.
+- **Devnet only.** `MockBackend` is the default; the devnet `Capture402Backend` is implemented by the teammate and must pass `test/backend-contract.ts` before the pitch can say "on devnet".
+
 ## Pre-existing vs built during the hackathon
 
-- **Pre-existing:** SingIt (the product and its x402 paid API) and capture402-solana (the escrow program and x402 integration, by the teammate).
-- **Built during the hackathon:** the SingIt MCP server, the mandate engine, the PaymentBackend contract, MockBackend, the Capture402Backend integration, the human-approval dispute flow, the audit log, the tests, the demo script and the demo dashboard.
+- **Pre-existing:** SingIt (the product and its x402 paid API) and capture402-solana (the escrow program and x402 integration, by the teammate). The devnet `Capture402Backend` adapter is also the teammate's.
+- **Built during the hackathon:** the SingIt MCP server, the mandate engine, the PaymentBackend contract, MockBackend, the backend conformance suite and devnet smoke harness, the human-approval dispute flow, the audit log, the tests, the demo script and the demo dashboard.
