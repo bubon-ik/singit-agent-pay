@@ -19,6 +19,7 @@
     "test": "vitest run",
     "demo": "tsx scripts/demo.ts",
     "approve": "tsx scripts/approve.ts",
+    "devnet:smoke": "tsx scripts/devnet-smoke.ts",
     "demo:all": "bash scripts/demo-all.sh"
   },
   "dependencies": {
