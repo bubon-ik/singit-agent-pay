@@ -4,8 +4,8 @@ This backend is for a **trusted local devnet service with separate throwaway key
 It is implemented and tested offline. No live signing, RPC request, funding,
 deployment, devnet acceptance or full MCP E2E is established by local tests.
 The direct smoke and contract suite require separate explicit owner authorization
-before live execution. Do not run a live MCP service until the PaymentService
-persistence/reservation work below is reviewed and implemented.
+before live execution. Live MCP use still requires review of the configured durable
+store, startup restoration of unresolved evidence and the acceptance gates below.
 
 ## ABI and provenance
 
@@ -28,9 +28,46 @@ through refunds. Payment history needs original finalized transaction evidence.
 ## Configuration and independent deployment acceptance
 
 Copy `singit-mcp/.env.example` to a private ignored environment file and fill it
-locally; never paste key material into chat. The program ID is mandatory and
-**not yet confirmed for this integration**. A deployer public key is not a
-program ID. Local `[42;32]` and other source fixture IDs prove no deployment.
+locally; never paste key material into chat. The program ID is mandatory; the
+partner-confirmed hackathon deployment is recorded below. A deployer public key
+is not a program ID. Local `[42;32]` and other source fixture IDs prove no deployment.
+
+### Confirmed devnet deployment (hackathon fixture)
+
+Public deployment identity supplied by the Capture402 author (starPaw) for this
+hackathon. These are public on-chain values, not secrets:
+
+```sh
+SINGIT_PROGRAM_ID=992QmwmwCebawRJsTCgvc8qnzGivbFaD39ZQE7VhHp7o
+SINGIT_PROGRAM_DATA=HTKbRudHxuqgQvqpfrUM59ZohVfbx81Yu8Bdyp897doM
+SINGIT_DEPLOYMENT_SLOT=508146249
+SINGIT_EXECUTABLE_SHA256=adee4e8f51fbc52b046c4d5a846c63ecdb63d392b1d16b559d3f6c2984b27415
+```
+
+Provenance: `992Qmwmw…` also appears as a test fixture in capture402-solana
+`ops/test_reconcile_wire.py:17`; that repo reference proves nothing. It is the
+deployment ID here only because the partner confirmed it as their devnet deployment.
+
+Read-only check on 2026-10-19 (one public devnet RPC, genesis
+`EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG`, finalized):
+
+- Program account exists, `executable: true`, owner
+  `BPFLoaderUpgradeab1e11111111111111111111111`, points to the ProgramData above.
+- ProgramData is owned by the upgradeable loader, has deployment slot `508146249`, and
+  SHA256 of bytes after offset 45 (including padding) equals the value above.
+- On-chain upgrade authority: `FoPVWtFGoGmnJCarUaqA7bbyhNpR7QsRDE171oDp1Bqm`
+  (the program is upgradeable; the partner still has to confirm who holds this key).
+
+This shows that the values agree with chain state. It is **not** independent acceptance:
+nobody has compared a source build of the pinned commit with this payload yet.
+
+**Still needed before any live smoke** (public values only, never keys):
+
+- `SINGIT_PAYER_ADDRESS`, `SINGIT_MERCHANT_ADDRESS` (public keys of separate
+  throwaway devnet wallets; keypair files stay local, outside Git, mode 600)
+- confirmation of the upgrade authority above and its upgrade policy during the hackathon
+- RPC choice: approved Helius/QuickNode HTTPS endpoint (the backend refuses public RPC)
+- funding status: payer/merchant SOL and Circle devnet USDC ATAs (see planning table below)
 
 Before configuration, the owner must independently approve the devnet deployment
 and the executable built from the pinned source. Supply its program ID,
@@ -111,10 +148,17 @@ describes the history search; [getTransaction](https://solana.com/docs/rpc/http/
 explicitly permits null when a transaction is not found at the requested commitment.
 
 Each economic method also accepts per-call `{onPrepared: async prepared => ...}`.
-This awaited hook carries `txSig` (alias of signature), PDA/holdId, salt, original
-amount/guards, wire and lifetime; its failure prevents send. PaymentService's
-hardening must pass it and await durable reservation/journal persistence. The
-synchronous factory does not silently create a journal for the MCP path.
+The `SubmitContext` hook receives `PreparedTx`: `txSig`, PDA/holdId, a safe numeric
+`lastValidBlockHeight` and nested `evidence` retaining the original signature,
+salt, amount/guards, wire and string lifetime. Its failure prevents send.
+PaymentService journals the complete prepared object, and `OperationRecord`
+retains it across JSON storage/reload. Reconciliation forwards `prepared.evidence`
+in the main-compatible `TxOutcomeQuery`. This adapter returns `executed` only for
+original finalized success, `failed` only for original finalized error, and
+`pending` for missing history or a legacy journal without its original wire.
+It never returns a terminal `not_found` to PaymentService. The direct evidence
+overload above retains its richer observations. The synchronous factory does not
+silently create or restore a durable journal for the live MCP path.
 
 The optional `retainBeforeSend(evidence)` dependency runs before any possible
 submission; a sink failure prevents sending. The two live scripts use exclusive
@@ -129,16 +173,14 @@ until an independently reviewed reconciliation determines the original outcome.
 Do not rerun a suite, refresh blockhash, generate another salt, switch provider,
 remove evidence, or automatically void/refund to compensate for UNKNOWN.
 
-**PaymentService remains a blocker for safe live MCP use:** it has no durable
-operation journal or mandate reservation before authorize, serial concurrency
-control, restart recovery or reconciliation. Its existing `toRefusal` only maps
-BackendError; the new UNKNOWN type must be handled explicitly by service/MCP
-callers, persisted with original identity/wire, and exposed as a distinct pending
-outcome rather than a blocked payment or retry suggestion. Preserve reservations
-across UNKNOWN and failed post-send status reads. Hold's current wrong-mint
-cleanup/budget-restoration path must not release a reservation without proven
-finalized effects. Dispute resolution's multi-step void/refund also needs separate
-durable steps. Do not claim these are fixed by this backend implementation.
+**Remaining live MCP acceptance gates:** current main supplies PaymentService's
+operation journal, reservations, write serialization and UNKNOWN handling. This
+branch connects that API to the real backend and tests all four operations through
+a durable offline restart. The live entrypoint must still select a private durable
+store and restore/reconcile every pending record before admitting new writes;
+the factory and default in-memory service do not establish those startup gates.
+Review multi-process custody, post-send persistence failures and dispute cleanup
+separately. Local compatibility and mock MCP E2E are not live economic acceptance.
 
 ## Local checks
 

@@ -17,6 +17,7 @@
     "start": "tsx src/index.ts",
     "start:http": "tsx src/index.ts --http",
     "test": "vitest run",
+    "e2e:mcp": "vitest run test/e2e.mcp",
     "demo": "tsx scripts/demo.ts",
     "approve": "tsx scripts/approve.ts",
     "devnet:smoke": "tsx scripts/devnet-smoke.ts",

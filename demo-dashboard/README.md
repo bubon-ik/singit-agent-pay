@@ -76,6 +76,10 @@ Tool names and audit actions are the same. Use `hold` for escrow authorization. 
 
 Real Solana signatures are linked to the devnet explorer. Mock transaction references remain plain badges.
 
+## Operations (ops) — upcoming singit-mcp hardening
+
+The Operations card appears only when `/api/state` includes an `ops` array. Pending operations show an amber spinner; unknown outcomes show orange “OUTCOME UNKNOWN — funds reserved, reconciling”. Mandates show “reserved X USDC (pending)” for active reservations, which are already included in `committed`. Refusal codes `OPERATION_UNKNOWN` / `OPERATION_PENDING` and `OUTCOME_UNKNOWN` / reconcile audit rows use amber or orange styling instead of red. Run `npm run test:unit` for the offline unit tests.
+
 ## Screenshots
 
 `scripts/screenshot.sh` boots the bridge on a spare port and walks the full 13-step story in presenter mode, capturing:
@@ -93,11 +97,11 @@ Real Solana signatures are linked to the devnet explorer. Mock transaction refer
 
 The 13-step story recording lives in `backup/demo.mp4` (with a `backup/demo.gif` GIF version). It is **not in git** — the files are kept out of the repo and published as a GitHub release asset instead, so a fresh clone won’t have them locally.
 
-If `backup/demo.mp4` is missing, download the media from the GitHub release assets into `backup/` (the release and its tag will be set when the release is created; until then the media is not published):
+If `backup/demo.mp4` is missing, download the media from the latest GitHub release assets into `backup/`:
 
 ```sh
-gh release download --repo bubon-ik/singit-agent-pay --pattern 'demo.mp4' --dir backup/
-gh release download --repo bubon-ik/singit-agent-pay --pattern 'demo.gif' --dir backup/   # optional GIF
+gh release download --repo <repo-org>/<repo> --pattern 'demo.mp4' --dir backup/
+gh release download --repo <repo-org>/<repo> --pattern 'demo.gif' --dir backup/   # optional GIF
 ```
 
 (or use the release page’s asset links). Then open the playback page with `npm run backup`, or play the file directly with `xdg-open backup/demo.mp4`. The recording is paced for presenters.

@@ -49,7 +49,9 @@ import {
   BackendOutcomeUnknown,
   DEVNET_USDC_MINT,
   type BackendTxOutcome,
-  type BackendWriteOptions,
+  type SubmitContext,
+  type TxOutcome,
+  type TxOutcomeQuery,
   type CaptureRequest,
   type EscrowStatus,
   type HoldReceipt,
@@ -522,13 +524,13 @@ export class Capture402Backend implements PaymentBackend {
         };
   }
 
-  hold(req: HoldRequest, options?: BackendWriteOptions): Promise<HoldReceipt> {
+  hold(req: HoldRequest, options?: SubmitContext): Promise<HoldReceipt> {
     return this.exclusive(() => this.holdOnce(req, options));
   }
 
   private async holdOnce(
     req: HoldRequest,
-    options?: BackendWriteOptions,
+    options?: SubmitContext,
   ): Promise<HoldReceipt> {
     this.writable();
     const payer = key(req.payer),
@@ -675,7 +677,7 @@ export class Capture402Backend implements PaymentBackend {
     operation: "capture" | "release" | "refund",
     amount?: bigint,
     releaseRemainder = false,
-    options?: BackendWriteOptions,
+    options?: SubmitContext,
   ): Promise<TxReceipt> {
     this.writable();
     key(req.holdId);
@@ -766,7 +768,7 @@ export class Capture402Backend implements PaymentBackend {
 
   capture(
     req: CaptureRequest,
-    options?: BackendWriteOptions,
+    options?: SubmitContext,
   ): Promise<TxReceipt> {
     if (typeof req.releaseRemainder !== "boolean")
       return Promise.reject(
@@ -778,7 +780,7 @@ export class Capture402Backend implements PaymentBackend {
   }
   release(
     req: ReleaseRequest,
-    options?: BackendWriteOptions,
+    options?: SubmitContext,
   ): Promise<TxReceipt> {
     return this.exclusive(() =>
       this.mutation(req, "release", undefined, false, options),
@@ -786,7 +788,7 @@ export class Capture402Backend implements PaymentBackend {
   }
   refund(
     req: RefundRequest,
-    options?: BackendWriteOptions,
+    options?: SubmitContext,
   ): Promise<TxReceipt> {
     return this.exclusive(() =>
       this.mutation(req, "refund", req.amount, false, options),
@@ -794,7 +796,35 @@ export class Capture402Backend implements PaymentBackend {
   }
 
   /** Reconcile only the original signed operation, including after a process restart. */
-  getTxOutcome(evidence: UnknownOperation): Promise<BackendTxOutcome> {
+  getTxOutcome(query: TxOutcomeQuery): Promise<TxOutcome>;
+  getTxOutcome(evidence: UnknownOperation): Promise<BackendTxOutcome>;
+  async getTxOutcome(
+    query: TxOutcomeQuery | UnknownOperation,
+  ): Promise<TxOutcome | BackendTxOutcome> {
+    if (!("kind" in query)) return this.reconcileEvidence(query);
+    const evidence = query.evidence ?? this.uncertain;
+    // A legacy journal without the original wire cannot prove a terminal outcome.
+    if (!evidence) return { status: "pending" };
+    if (
+      query.kind !== evidence.operation ||
+      query.txSig !== evidence.signature ||
+      (query.holdId !== null && query.holdId !== evidence.holdId) ||
+      (query.salt !== undefined && query.salt !== evidence.salt) ||
+      (query.lastValidBlockHeight !== undefined &&
+        (!Number.isSafeInteger(query.lastValidBlockHeight) ||
+          String(query.lastValidBlockHeight) !== evidence.lastValidBlockHeight))
+    ) {
+      throw new BackendError("invalid_evidence", "Query differs from the original operation");
+    }
+    const result = await this.reconcileEvidence(evidence);
+    // PaymentService treats not_found as terminal. Missing RPC history is only pending here.
+    if (!result.terminal) return { status: "pending" };
+    return result.status === "landed"
+      ? { status: "executed", txSig: result.signature, holdId: evidence.holdId }
+      : { status: "failed", code: "transaction_failed" };
+  }
+
+  private reconcileEvidence(evidence: UnknownOperation): Promise<BackendTxOutcome> {
     return this.exclusive(async () => {
       await this.validateEvidence(evidence);
       if (
@@ -1005,7 +1035,7 @@ export class Capture402Backend implements PaymentBackend {
       | "expectedHeld"
       | "expectedRefundable"
     >,
-    options?: BackendWriteOptions,
+    options?: SubmitContext,
   ): Promise<TxReceipt> {
     this.writable();
     const { value: lifetime } = await this.read(() =>
@@ -1078,7 +1108,14 @@ export class Capture402Backend implements PaymentBackend {
     this.uncertain = evidence;
     try {
       await options?.onPrepared?.(
-        Object.freeze({ ...evidence, txSig: evidence.signature }),
+        Object.freeze({
+          txSig: evidence.signature,
+          holdId: evidence.holdId,
+          ...(Number.isSafeInteger(Number(evidence.lastValidBlockHeight))
+            ? { lastValidBlockHeight: Number(evidence.lastValidBlockHeight) }
+            : {}),
+          evidence,
+        }),
       );
       await this.retainBeforeSend?.(evidence);
     } catch {

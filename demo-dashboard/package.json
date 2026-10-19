@@ -11,7 +11,9 @@
     "story:auto": "node scripts/story.mjs --auto-approve",
     "screenshot": "bash scripts/screenshot.sh",
     "backup": "xdg-open backup/index.html || open backup/index.html",
-    "test:e2e": "node --test scripts/e2e.test.mjs"
+    "test:unit": "node --test scripts/ops.test.mjs",
+    "test:e2e": "node --test scripts/e2e.test.mjs",
+    "test": "node --test scripts/ops.test.mjs scripts/e2e.test.mjs"
   },
   "engines": { "node": ">=20" }
 }

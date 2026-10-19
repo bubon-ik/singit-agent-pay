@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, expect, test } from "vitest";
 import {
   address,
@@ -23,6 +26,9 @@ import {
   BackendError,
   BackendOutcomeUnknown,
   type UnknownOperation,
+  type PreparedTx,
+  type PaymentBackend,
+  type TxOutcomeQuery,
   DEVNET_USDC_MINT,
   type HoldRequest,
 } from "../src/backend/types.js";
@@ -34,6 +40,8 @@ import {
   U64_MAX,
 } from "../src/backend/capture402-abi/program.js";
 import { runBackendContract } from "./backend-contract.js";
+import { PaymentService } from "../src/service.js";
+import { FileStateStore } from "../src/store.js";
 const addr = (n: number) =>
   getAddressDecoder().decode(new Uint8Array(32).fill(n));
 const enc = (s: string) => Buffer.from(getAddressEncoder().encode(address(s)));
@@ -767,10 +775,11 @@ test("per-call onPrepared persists exact wire before submission and is awaited",
   const call = f.backend.hold(req(), {
     onPrepared: async (p) => {
       expect(f.sent).toHaveLength(0);
-      expect(p.txSig).toBe(p.signature);
+      expect(p.txSig).toBe(p.evidence!.signature);
       expect(p.holdId).toBeTruthy();
-      expect(p.lastValidBlockHeight).toBe("100");
-      prepared = p;
+      expect(p.lastValidBlockHeight).toBe(100);
+      expect(p.evidence!.lastValidBlockHeight).toBe("100");
+      prepared = p.evidence;
       ready();
       await blocked;
     },
@@ -801,9 +810,9 @@ test("each mutation invokes its per-call hook before sending", async () => {
   const holdId = await open(),
     seen: string[] = [];
   const options = {
-    onPrepared: (p: UnknownOperation) => {
+    onPrepared: (p: PreparedTx) => {
       expect(f.sent).toHaveLength(seen.length + 1);
-      seen.push(p.operation);
+      seen.push(p.evidence!.operation);
     },
   };
   await f.backend.capture(
@@ -1018,3 +1027,128 @@ test("a stale account response cannot unlock a finalized reconciliation", async 
   await code(f.backend.getTxOutcome(e), "rpc_unavailable");
   expect(f.backend.pendingOperation?.signature).toBe(e.signature);
 });
+
+function outcomeQuery(evidence: UnknownOperation): TxOutcomeQuery {
+  return {
+    kind: evidence.operation,
+    txSig: evidence.signature,
+    holdId: evidence.holdId,
+    payer: f.payer.address,
+    salt: evidence.salt,
+    lastValidBlockHeight: Number(evidence.lastValidBlockHeight),
+    evidence,
+  };
+}
+
+test("PaymentBackend query maps only finalized original outcomes to terminal service results", async () => {
+  const backend: PaymentBackend = f.backend;
+  const evidence = await uncertainHold();
+  f.historyAbsent = true;
+  f.blockHeight = 101n;
+  expect(await backend.getTxOutcome!(outcomeQuery(evidence))).toEqual({ status: "pending" });
+  expect(f.backend.pendingOperation).toEqual(evidence);
+  f.historyAbsent = false;
+  expect(await backend.getTxOutcome!(outcomeQuery(evidence))).toEqual({
+    status: "executed", txSig: evidence.signature, holdId: evidence.holdId,
+  });
+  expect(f.backend.pendingOperation).toBeUndefined();
+  expect(f.sent).toHaveLength(1);
+});
+
+test("PaymentBackend query reports finalized failure without resending", async () => {
+  f.chainError = { InstructionError: [0, "InvalidArgument"] };
+  const evidence = await uncertainHold();
+  const backend: PaymentBackend = f.backend;
+  expect(await backend.getTxOutcome!(outcomeQuery(evidence))).toEqual({
+    status: "failed", code: "transaction_failed",
+  });
+  expect(f.backend.pendingOperation).toBeUndefined();
+  expect(f.sent).toHaveLength(1);
+});
+
+test("legacy service query without original wire stays pending after restart", async () => {
+  const evidence = await uncertainHold();
+  const backend: PaymentBackend = new Capture402Backend(f.config, { rpc: f.rpc });
+  const { evidence: _original, ...legacy } = outcomeQuery(evidence);
+  const reads = f.calls.length;
+  expect(await backend.getTxOutcome!(legacy)).toEqual({ status: "pending" });
+  expect(f.calls).toHaveLength(reads);
+  expect(f.sent).toHaveLength(1);
+});
+
+test("service query cannot reconcile a different operation's evidence", async () => {
+  const evidence = await uncertainHold();
+  for (const changed of [
+    { kind: "capture" as const }, { txSig: "unrelated" }, { holdId: addr(70) },
+    { salt: "bb".repeat(32) }, { lastValidBlockHeight: 101 },
+  ]) {
+    await code(f.backend.getTxOutcome({ ...outcomeQuery(evidence), ...changed }), "invalid_evidence");
+    expect(f.backend.pendingOperation).toEqual(evidence);
+  }
+  expect(f.sent).toHaveLength(1);
+});
+
+test.each(["hold", "capture", "release", "refund"] as const)(
+  "PaymentService journals the original %s before send and reconciles it after restart",
+  async (operation) => {
+    const dir = mkdtempSync(join(tmpdir(), "singit-capture402-state-"));
+    try {
+      const store = new FileStateStore(dir);
+      const backend = new Capture402Backend(f.config, {
+        rpc: f.rpc,
+        loadSigner: async (p) => p === "payer" ? f.payer : f.merchant,
+        retainBeforeSend: async (evidence) => {
+          const prepared = new FileStateStore(dir).load().ops.find(
+            (op) => op.prepared?.txSig === evidence.signature,
+          );
+          expect(prepared?.state).toBe("pending");
+          expect(prepared?.prepared?.evidence).toEqual(evidence);
+          expect(prepared?.prepared?.lastValidBlockHeight).toBe(100);
+        },
+      });
+      const service = new PaymentService({ backend, store, now: () => f.now });
+      const mandate = await service.createMandate({
+        actor: f.payer.address, payer: f.payer.address,
+        totalBudget: 2_000_000n, perTxCap: 1_000_000n,
+        expiresAt: f.now + 7200, allowedCounterparties: [f.merchant.address],
+      });
+      const holdArgs = {
+        actor: f.payer.address, mandateId: mandate.id,
+        payee: f.merchant.address, amount: 1_000_000n, idempotencyKey: "original-hold",
+      };
+      const hold = operation === "hold" ? undefined : await service.hold(holdArgs);
+      if (operation === "refund") {
+        await service.capture({ actor: f.merchant.address, holdId: hold!.id, amount: 600_000n });
+      }
+      f.lostSend = true;
+      const call = operation === "hold" ? service.hold(holdArgs)
+        : operation === "capture" ? service.capture({ actor: f.merchant.address, holdId: hold!.id, amount: 600_000n })
+        : operation === "release" ? service.release({ actor: f.merchant.address, holdId: hold!.id })
+        : service.refund({ actor: f.merchant.address, holdId: hold!.id, amount: 200_000n });
+      await expect(call).rejects.toMatchObject({ code: "OPERATION_UNKNOWN" });
+      f.lostSend = false;
+      const original = store.load().ops.find((op) => op.state === "unknown")!;
+      expect(original.action).toBe(operation);
+      expect(original.prepared?.evidence?.signedTransaction).toBe(f.sent.at(-1));
+      const sent = f.sent.length;
+      const restored = new Capture402Backend(f.config, {
+        rpc: f.rpc,
+        loadSigner: async () => { throw Error("Reconciliation must not load a signer"); },
+      });
+      const restarted = new PaymentService({ backend: restored, store: new FileStateStore(dir), now: () => f.now });
+      f.historyAbsent = true;
+      f.blockHeight = 101n;
+      expect((await restarted.reconcile(original.id)).state).toBe("unknown");
+      expect(restored.pendingOperation).toEqual(original.prepared?.evidence);
+      expect(restarted.getMandate(mandate.id).reserved).toBe(operation === "hold" ? 1_000_000n : 0n);
+      expect(f.sent).toHaveLength(sent);
+      f.historyAbsent = false;
+      expect((await restarted.reconcile(original.id)).state).toBe("succeeded");
+      expect(restored.pendingOperation).toBeUndefined();
+      expect(restarted.getMandate(mandate.id).reserved).toBe(0n);
+      expect(f.sent).toHaveLength(sent);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);

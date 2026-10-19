@@ -9,6 +9,9 @@ import type {
   PaymentBackend,
   RefundRequest,
   ReleaseRequest,
+  SubmitContext,
+  TxOutcome,
+  TxOutcomeQuery,
 } from "../src/backend/types.js";
 import { PaymentService } from "../src/service.js";
 
@@ -53,22 +56,25 @@ class WrongMintBackend implements PaymentBackend {
   createMandate(terms: MandateTerms) {
     return this.inner.createMandate(terms);
   }
-  hold(req: HoldRequest) {
-    return this.inner.hold(req);
+  hold(req: HoldRequest, ctx?: SubmitContext) {
+    return this.inner.hold(req, ctx);
   }
-  capture(req: CaptureRequest) {
-    return this.inner.capture(req);
+  capture(req: CaptureRequest, ctx?: SubmitContext) {
+    return this.inner.capture(req, ctx);
   }
-  release(req: ReleaseRequest) {
-    return this.inner.release(req);
+  release(req: ReleaseRequest, ctx?: SubmitContext) {
+    return this.inner.release(req, ctx);
   }
-  refund(req: RefundRequest) {
-    return this.inner.refund(req);
+  refund(req: RefundRequest, ctx?: SubmitContext) {
+    return this.inner.refund(req, ctx);
   }
   async getStatus(holdId: string): Promise<EscrowStatus | null> {
     const status = await this.inner.getStatus(holdId);
     if (!status) return null;
     return { ...status, mint: "definitely-not-devnet-usdc" };
+  }
+  getTxOutcome(q: TxOutcomeQuery): Promise<TxOutcome> {
+    return this.inner.getTxOutcome(q);
   }
 }
 
@@ -177,7 +183,7 @@ test("hold: backend reports a non-devnet-USDC mint on getStatus -> WRONG_MINT, h
   expect(() => service.getHold(holdId)).toThrow();
 
   expect(releaseSpy).toHaveBeenCalledTimes(1);
-  expect(releaseSpy).toHaveBeenCalledWith(expect.objectContaining({ holdId, expectedHeld: 500_000n, expectedRefundable: 0n }));
+  expect(releaseSpy).toHaveBeenCalledWith(expect.objectContaining({ holdId, expectedHeld: 500_000n, expectedRefundable: 0n }), expect.anything());
 });
 
 test("captureDeadline in milliseconds -> INVALID_DEADLINE (QA M-3)", async () => {

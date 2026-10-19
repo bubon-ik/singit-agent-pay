@@ -6,7 +6,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { beforeEach, describe, expect, test } from "vitest";
-import { BackendError, DEVNET_USDC_MINT, type PaymentBackend } from "../src/backend/types.js";
+import { BackendError, DEVNET_USDC_MINT, type PaymentBackend, type PreparedTx } from "../src/backend/types.js";
 import { PaymentService } from "../src/service.js";
 
 export interface ContractFixture {
@@ -66,6 +66,7 @@ export function runBackendContract(
 
     async function openHold(maximum: bigint = fx.unit) {
       const { captureDeadline, refundDeadline } = deadlines();
+      let prepared: PreparedTx | undefined;
       const receipt = await fx.backend.hold({
         payer: fx.payer,
         mint: DEVNET_USDC_MINT,
@@ -74,8 +75,8 @@ export function runBackendContract(
         captureDeadline,
         refundDeadline,
         salt: salt(),
-      });
-      return { receipt, captureDeadline, refundDeadline };
+      }, { onPrepared: (p) => { prepared = p; } });
+      return { receipt, prepared, captureDeadline, refundDeadline };
     }
 
     test(
@@ -326,6 +327,13 @@ export function runBackendContract(
       timeout,
     );
 
+    test("j. BackendError.phase defaults to 'validation', settable via the 3rd ctor arg", () => {
+      const definite = new BackendError("amount", "bad amount");
+      expect(definite.phase).toBe("validation");
+      const confirmed = new BackendError("transaction_failed", "landed with an error", "confirmed_failure");
+      expect(confirmed.phase).toBe("confirmed_failure");
+    });
+
     test(
       "k. integration through PaymentService",
       async () => {
@@ -351,6 +359,51 @@ export function runBackendContract(
 
         const dispute = await service.openDispute({ actor: fx.payer, holdId: hold.id, reason: "contract suite check", evidence: [] });
         expect(dispute.status).toBe("open");
+      },
+      timeout,
+    );
+
+    test(
+      "l. onPrepared reports the final txSig before the hold call resolves",
+      async (ctx) => {
+        const prepared: Array<{ txSig: string; holdId?: string }> = [];
+        const { captureDeadline, refundDeadline } = deadlines();
+        const receipt = await fx.backend.hold(
+          { payer: fx.payer, mint: DEVNET_USDC_MINT, payee: fx.payee, maximum: fx.unit, captureDeadline, refundDeadline, salt: salt() },
+          {
+            onPrepared: (p) => {
+              prepared.push(p);
+            },
+          },
+        );
+        // Backends without transaction preparation may omit the hook.
+        if (prepared.length === 0) {
+          ctx.skip();
+          return;
+        }
+        expect(prepared.length).toBe(1);
+        expect(prepared[0].txSig).toBe(receipt.txSig);
+        expect(prepared[0].txSig.length).toBeGreaterThan(0);
+      },
+      timeout,
+    );
+
+    test(
+      "m. getTxOutcome: executed for a prepared hold, no success/failure proof for an unknown signature",
+      async (ctx) => {
+        const backend = fx.backend;
+        const getTxOutcome = backend.getTxOutcome;
+        if (!getTxOutcome) {
+          ctx.skip();
+          return;
+        }
+        const { receipt, prepared } = await openHold();
+        const outcome = await getTxOutcome.call(backend, { kind: "hold", txSig: receipt.txSig, holdId: receipt.holdId, payer: fx.payer, evidence: prepared?.evidence });
+        expect(outcome.status).toBe("executed");
+
+        const unknown = await getTxOutcome.call(backend, { kind: "hold", txSig: "not-a-real-signature-ever-issued", holdId: null, payer: fx.payer });
+        // The in-memory mock can establish absence; a chain backend must retain uncertainty.
+        expect(["not_found", "pending"]).toContain(unknown.status);
       },
       timeout,
     );

@@ -18,6 +18,19 @@ before(async () => {
 });
 after(() => srv?.kill());
 
+test("static assets: page modules are served as JavaScript", async () => {
+  const app = await fetch(`${BASE}/app.js`);
+  assert.equal(app.status, 200);
+  assert.ok((app.headers.get("content-type") || "").startsWith("text/javascript"), `app.js content-type: ${app.headers.get("content-type")}`);
+  const ops = await fetch(`${BASE}/ops.mjs`);
+  assert.equal(ops.status, 200);
+  assert.ok((ops.headers.get("content-type") || "").startsWith("text/javascript"), `ops.mjs content-type: ${ops.headers.get("content-type")}`);
+  const root = await fetch(`${BASE}/`);
+  assert.equal(root.status, 200);
+  const html = await root.text();
+  assert.ok(html.includes("app.js"), "index.html must reference app.js");
+});
+
 test("demo story: budget enforcement, escrow lifecycle, human-approved dispute", async () => {
   const captions = new Set();
   const pollCaptions = setInterval(async () => {

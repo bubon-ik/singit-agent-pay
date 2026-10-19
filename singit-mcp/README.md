@@ -45,6 +45,10 @@ Open the dashboard and run the story. `Ctrl-C` stops both processes.
 
 HTTP binds to `127.0.0.1`; set `PORT` to change the default port `8787`. The HTTP transport can also be selected with `SINGIT_MCP_HTTP=1`. `SINGIT_RATE_LIMIT_PER_MIN` sets the per-client request limit (default `120`).
 
+### MCP E2E
+
+Run `npm run e2e:mcp` to exercise the real streamable-HTTP MCP path against `MockBackend`, including mandate/hold/capture/release, disputes, human-approved refunds, audit state, and refusal cases. The optional live variant is gated by `SINGIT_E2E_DEVNET=1` and the required devnet configuration and key paths; it is skipped by default.
+
 ### Connect to Claude Code
 
 HTTP (recommended: the approval secret stays in the server process, out of the agent's config):
