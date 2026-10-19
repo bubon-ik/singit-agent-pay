@@ -90,7 +90,7 @@ test("GET /api/state has the right shape and reflects a mandate+hold created dir
     expect(state.ops[0].action).toBe("hold");
     expect(state.ops[0].state).toBe("succeeded");
     expect(state.ops[0].holdId).toBe(hold.id);
-    expect(state.ops[0].reservation).toBe("500000");
+    expect(state.ops[0].reservation).toBe("0");
   } finally {
     await closeServer(server);
   }

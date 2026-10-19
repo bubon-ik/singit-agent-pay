@@ -144,6 +144,25 @@ test("a) two parallel holds, only one fits -> one ok, one OVER_BUDGET, exactly 1
   assertInvariant(service, mock, mandate.id);
 });
 
+test("succeeded hold reservations clear only after accounting commits the hold", async () => {
+  const { service, backend, now } = setup();
+  const mandate = await createMandate(service, now, 1_000_000n);
+
+  backend.queueHoldFault("ambiguous-after");
+  await expectRefused(
+    service.hold({ actor: PAYER, mandateId: mandate.id, payee: PAYEE, amount: 400_000n }),
+    "OPERATION_UNKNOWN",
+  );
+  const unknownOp = service.listOperations({ state: "unknown" }).find((op) => op.action === "hold")!;
+  expect(unknownOp.reservation).toBe("400000");
+  expect(service.getMandate(mandate.id).mandate.committed).toBe(400_000n);
+
+  await service.reconcile(unknownOp.id);
+  expect(service.getOperation(unknownOp.id).state).toBe("succeeded");
+  expect(service.getOperation(unknownOp.id).reservation).toBe("0");
+  expect(service.getMandate(mandate.id).mandate.committed).toBe(400_000n);
+});
+
 test("b) hold response lost after successful send -> OPERATION_UNKNOWN; reconcile converges; no duplicate hold", async () => {
   const { service, backend, mock, now } = setup();
   const mandate = await createMandate(service, now, 1_000_000n);
