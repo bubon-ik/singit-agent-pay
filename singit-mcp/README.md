@@ -12,6 +12,8 @@ npm run demo      # the dashboard story in the terminal: 10 USDC mandate, 3 bloc
 
 `npm run demo:all` starts the MCP HTTP server and the demo dashboard from `../demo-dashboard`.
 
+Vitest keeps its default exclusions and also ignores `dist/`. Running `npm run build` followed by `npm test` executes the source tests once, without collecting emitted test copies.
+
 ## Run the demo on your laptop
 
 **Prereqs:** macOS or Linux, Node 22 or 20 (`nvm use` reads `.nvmrc`), and `singit-mcp/` and `demo-dashboard/` side by side in one folder. No Solana wallet or keys needed: it runs on the mock backend.
