@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
 import { beforeEach, expect, test } from "vitest";
 import {
   address,
@@ -42,6 +43,7 @@ import {
 import { runBackendContract } from "./backend-contract.js";
 import { PaymentService } from "../src/service.js";
 import { FileStateStore } from "../src/store.js";
+import { createHttpHandler } from "../src/http.js";
 const addr = (n: number) =>
   getAddressDecoder().decode(new Uint8Array(32).fill(n));
 const enc = (s: string) => Buffer.from(getAddressEncoder().encode(address(s)));
@@ -1148,6 +1150,105 @@ test.each(["hold", "capture", "release", "refund"] as const)(
       expect(restarted.getMandate(mandate.id).reserved).toBe(0n);
       expect(f.sent).toHaveLength(sent);
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+async function stateEndpoint(service: PaymentService) {
+  const server = createServer(createHttpHandler({ service, backendName: "devnet" }));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/state`;
+  return {
+    read: async (original: UnknownOperation, state: string) => {
+      const response = await fetch(url);
+      expect(response.status).toBe(200);
+      const raw = await response.text();
+      expect(raw).not.toContain(original.signedTransaction);
+      expect(raw).not.toContain('"evidence"');
+      expect(raw).not.toContain('"signedTransaction"');
+      const body = JSON.parse(raw);
+      expect(body.ops[0].state).toBe(state);
+      expect(body.ops[0].prepared).toEqual({
+        txSig: original.signature, holdId: original.holdId, lastValidBlockHeight: 100,
+      });
+      expect(service.getOperation(body.ops[0].id).prepared?.evidence).toEqual(original);
+    },
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+async function serviceWithJournal(backend: Capture402Backend, dir: string) {
+  const service = new PaymentService({ backend, store: new FileStateStore(dir), now: () => f.now });
+  const mandate = await service.createMandate({
+    actor: f.payer.address, payer: f.payer.address,
+    totalBudget: 1_000_000n, perTxCap: 1_000_000n,
+    expiresAt: f.now + 7200, allowedCounterparties: [f.merchant.address],
+  });
+  return { service, hold: () => service.hold({
+    actor: f.payer.address, mandateId: mandate.id,
+    payee: f.merchant.address, amount: 1_000_000n,
+  }) };
+}
+
+test("HTTP state hides the signed wire before send and after a retention failure; the journal retains it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "singit-private-prepared-"));
+  let resume!: () => void;
+  const gate = new Promise<void>((resolve) => { resume = resolve; });
+  let ready!: () => void;
+  const entered = new Promise<void>((resolve) => { ready = resolve; });
+  const backend = new Capture402Backend(f.config, {
+    rpc: f.rpc,
+    loadSigner: async (path) => path === "payer" ? f.payer : f.merchant,
+    retainBeforeSend: async () => { ready(); await gate; throw Error("retention failed"); },
+  });
+  const { service, hold } = await serviceWithJournal(backend, dir);
+  const endpoint = await stateEndpoint(service);
+  const call = hold().catch((error) => error);
+  try {
+    await entered;
+    const original = backend.pendingOperation!;
+    expect(new FileStateStore(dir).load().ops[0].prepared?.evidence).toEqual(original);
+    await endpoint.read(original, "pending");
+    expect(f.sent).toHaveLength(0);
+    resume();
+    expect(await call).toMatchObject({ code: "BACKEND_ERROR" });
+    await endpoint.read(original, "failed");
+    expect(new FileStateStore(dir).load().ops[0].prepared?.evidence).toEqual(original);
+    expect(f.sent).toHaveLength(0);
+  } finally {
+    resume();
+    await call;
+    await endpoint.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test.each(["unknown", "succeeded"] as const)(
+  "HTTP state redacts %s evidence without changing private reconciliation data",
+  async (state) => {
+    const dir = mkdtempSync(join(tmpdir(), "singit-private-outcome-"));
+    const { service, hold } = await serviceWithJournal(f.backend, dir);
+    const endpoint = await stateEndpoint(service);
+    try {
+      f.lostSend = state === "unknown";
+      const call = hold();
+      if (state === "unknown") await expect(call).rejects.toMatchObject({ code: "OPERATION_UNKNOWN" });
+      else await call;
+      f.lostSend = false;
+      const op = service.listOperations()[0];
+      const original = op.prepared!.evidence!;
+      await endpoint.read(original, state);
+      expect(new FileStateStore(dir).load().ops[0].prepared?.evidence).toEqual(original);
+      if (state === "unknown") {
+        expect((await service.reconcile(op.id)).state).toBe("succeeded");
+        await endpoint.read(original, "succeeded");
+        expect(f.backend.pendingOperation).toBeUndefined();
+      }
+      expect(f.sent).toEqual([original.signedTransaction]);
+      expect(new FileStateStore(dir).load().ops[0].prepared?.evidence).toEqual(original);
+    } finally {
+      await endpoint.close();
       rmSync(dir, { recursive: true, force: true });
     }
   },

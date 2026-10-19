@@ -1123,12 +1123,14 @@ export class PaymentService {
     return entries.slice();
   }
 
+  /** Private journal record, including original signed evidence. Redact at transport boundaries. */
   getOperation(id: string): OperationRecord {
     const op = this.ops.get(id);
     if (!op) throw new Refusal("INVALID_INPUT", `BLOCKED: unknown operation ${id}`);
     return op;
   }
 
+  /** Private journal records. HTTP/dashboard callers must project public status fields. */
   listOperations(args: { state?: OpState; mandateId?: string; holdId?: string } = {}): OperationRecord[] {
     return [...this.ops.values()].filter(
       (o) =>

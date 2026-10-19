@@ -3,6 +3,7 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
+import { publicOperation } from "./lib/public-state.mjs";
 import { extname, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as local from "./adapter/local-service.mjs";
@@ -109,7 +110,7 @@ function normalizeRemoteState(s = {}) {
     const byId = new Map(mandates.map((m) => [m.id, m]));
     for (const h of s.holds) { const m = byId.get(h.mandateId); if (m && !m.holds.some((x) => x.id === h.id)) m.holds.push(normalizeRemoteHold(h)); }
   }
-  const ops = Array.isArray(s.ops) ? s.ops.map((op) => ({ ...op, reservation: op.reservation == null ? op.reservation : String(op.reservation), params: op.params && typeof op.params === "object" ? Object.fromEntries(Object.entries(op.params).map(([key, value]) => [key, value == null ? value : (typeof value === "bigint" || typeof value === "number") ? String(value) : value])) : op.params, expected: op.expected && typeof op.expected === "object" ? Object.fromEntries(Object.entries(op.expected).map(([key, value]) => [key, value == null ? value : (typeof value === "bigint" || typeof value === "number") ? String(value) : value])) : op.expected })) : undefined;
+  const ops = Array.isArray(s.ops) ? s.ops.map(publicOperation) : undefined;
   return { backend: s.backend, mandates, holds: Array.isArray(s.holds) ? s.holds.map(normalizeRemoteHold) : [], disputes: Array.isArray(s.disputes) ? s.disputes.map((d) => ({ ...d, refundAmount: d.refundAmount == null ? d.refundAmount : String(d.refundAmount), txRefs: d.txSigs ?? d.txRefs ?? [] })) : [], audit: Array.isArray(s.audit) ? s.audit : [], ...(ops ? { ops } : {}) };
 }
 async function refreshRemoteState(base) {
@@ -244,7 +245,7 @@ function snapshot() {
   const realSig = audit.some((a) => sigPattern.test(String(a.txSig ?? ""))) || mandates.some((m) => m.holds?.some((h) => [h.lastTxSig, ...(h.txSigs ?? [])].some((r) => sigPattern.test(String(r ?? ""))))) || normalizedDisputes.some((d) => [...(d.txRefs ?? []), ...(d.txSigs ?? [])].some((r) => sigPattern.test(String(r))));
   const chain = impl.kind === "mcp-http" ? (remoteCache.backend === "devnet" ? "devnet" : "mock") : realSig ? "devnet" : "mock";
   const escrow = chain === "mock" ? "escrow (mock)" : "on-chain escrow";
-  return { backend: backendConnecting ? "connecting" : impl.kind, chain, backendNote, cluster: CLUSTER, mandates, disputes: normalizedDisputes, timeline, audit, ...(Array.isArray(ops) ? { ops } : {}), story: { ...story, caption: story.caption.replaceAll("{escrow}", escrow) } };
+  return { backend: backendConnecting ? "connecting" : impl.kind, chain, backendNote, cluster: CLUSTER, mandates, disputes: normalizedDisputes, timeline, audit, ...(Array.isArray(ops) ? { ops: ops.map(publicOperation) } : {}), story: { ...story, caption: story.caption.replaceAll("{escrow}", escrow) } };
 }
 
 // ---------- demo story ----------

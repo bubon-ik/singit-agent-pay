@@ -2,6 +2,40 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { activeReservation, fmtUsdc, opsView, renderOpsHtml } from "../public/ops.mjs";
 import { deriveTimeline } from "../lib/derive.mjs";
+import { publicOperation } from "../lib/public-state.mjs";
+
+for (const state of ["pending", "unknown", "succeeded", "failed"]) {
+  test(`dashboard ${state} operations redact upstream and in-process evidence without mutation`, () => {
+    const wire = "private-synthetic-wire";
+    const prepared = Object.freeze({
+      txSig: "mock-tx-1", holdId: "payment", lastValidBlockHeight: 100,
+      evidence: { signedTransaction: wire }, signedTransaction: wire,
+    });
+    const original = Object.freeze({
+      id: "op-1", action: "hold", state, reservation: 1_000_000n,
+      createdAt: 1800000000, updatedAt: 1800000000,
+      params: { amount: "1000000", evidence: wire }, prepared,
+      result: { txSig: "mock-tx-1", evidence: wire },
+      error: { code: "synthetic_error", message: "Synthetic failure", evidence: wire },
+      salt: "private-salt", futurePrivateField: wire,
+    });
+    const projected = publicOperation(original);
+    assert.equal(JSON.stringify(projected).includes(wire), false);
+    assert.deepEqual(projected.prepared, { txSig: "mock-tx-1", holdId: "payment", lastValidBlockHeight: 100 });
+    assert.deepEqual(projected.params, { amount: "1000000" });
+    assert.deepEqual(projected.result, { txSig: "mock-tx-1" });
+    assert.deepEqual(projected.error, { code: "synthetic_error", message: "Synthetic failure" });
+    assert.equal(projected.salt, undefined);
+    assert.equal(projected.futurePrivateField, undefined);
+    assert.equal(original.prepared, prepared);
+    assert.equal(original.prepared.evidence.signedTransaction, wire);
+    assert.notEqual(projected.prepared, prepared);
+    const view = opsView([projected], 1800000000000);
+    const item = [...view.active, ...view.recent][0];
+    assert.equal(item.txSig, "mock-tx-1");
+    assert.equal(item.amount, "1.00 USDC");
+  });
+}
 
 test("operations formatting, reservation, and timeline reconciliation", () => {
   const now = Date.now();

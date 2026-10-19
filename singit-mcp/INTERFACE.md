@@ -150,7 +150,7 @@ result?, error?, reservation, createdAt, updatedAt`. `state` moves `pending` -> 
   `getTxOutcome` remain the ways to converge it. `MockBackend` implements it, so it exercises the
   full reconcile path in tests.
 - **`onPrepared` (`SubmitContext`)** is optional too: a backend that calls it durably records
-  `op.prepared` (`txSig`/`holdId`/`lastValidBlockHeight`) before sending, so a reconcile after a
+  `op.prepared` (`txSig`/`holdId`/`lastValidBlockHeight` plus full original `evidence`) before sending, so a reconcile after a
   lost response can still resolve truth even without `getTxOutcome`, as long as `getStatus`
   reflects the attempt.
 - **Backend calls are serialized:** every money-moving backend call on a given `PaymentService`
@@ -158,8 +158,14 @@ result?, error?, reservation, createdAt, updatedAt`. `state` moves `pending` -> 
   mandate) never overlap in flight on the backend, even though the reservation/lock checks above
   already make their outcome race-free.
 
-`GET /api/state` also returns `ops: OperationRecord[]` (same shape as above, amounts as decimal
-strings; `v` stays `1`).
+`GET /api/state` returns `ops` as explicit public status projections, with amounts
+as decimal strings. The public fields are operation identity/action, state, amounts,
+reservation, timestamps, error text and transaction metadata. Prepared metadata
+includes only `txSig`, `holdId` and `lastValidBlockHeight`. Full prepared evidence,
+signed wires, salt and idempotency keys stay in the private journal, including
+before send and after a failed retention hook. HTTP/dashboard reads do not mutate
+the journal or remove evidence needed for reconciliation. The dashboard applies
+this projection to both in-process records and remote upstream records.
 
 ## MCP tools (schemas: `toolSchemas` in [`src/server.ts`](src/server.ts), zod)
 
@@ -190,7 +196,7 @@ Amounts are base-unit decimal strings (`"2500000"` = 2.5 USDC). Times are intege
 - Backend: `SINGIT_BACKEND=mock` (default) or `capture402` (built by `buildBackendFromEnv`; explicit provider/deployment configuration required, see devnet guide). `SINGIT_MOCK_BALANCES='{"buyer-agent":"100000000"}'`.
 - Durable state (optional): `SINGIT_STATE_DIR` points `PaymentService` at a `FileStateStore` journal directory (`state.jsonl`); unset = in-memory `MemoryStateStore`, nothing survives a restart. Devnet signing keys: `SINGIT_PAYER_KEYPAIR`, `SINGIT_MERCHANT_KEYPAIR` (file paths only — see "Capture402Backend implementation" above; never log or print their contents).
 - HTTP handler lives in `src/http.ts` (`createHttpHandler`); `src/index.ts` just wires env/backend into it. Two rate-limit buckets, each its own `createRateLimiter` instance keyed by `cf-connecting-ip` header ?? socket address: `"mcp"` (`SINGIT_RATE_LIMIT_PER_MIN`, default 120) covers `/mcp` and `/human/resolve`; `"state"` (`SINGIT_STATE_RATE_LIMIT_PER_MIN`, default 600) covers `GET /api/state`. Over the limit: `429 {ok:false, error:"rate limited"}` with `Retry-After: 60`.
-- `GET /api/state`: dashboard snapshot — `{v: 1, backend, mandates, disputes, audit, holds, ops}` (bigints as decimal strings; `holds` is every hold across all mandates, `ops` is every operation journal record — see "Operation journal" above). `Access-Control-Allow-Origin: *` (read-only, GET only).
+- `GET /api/state`: dashboard snapshot — `{v: 1, backend, mandates, disputes, audit, holds, ops}` (bigints as decimal strings; `holds` is every hold across all mandates, `ops` contains public operation status projections — see "Operation journal" above). `Access-Control-Allow-Origin: *` (read-only, GET only).
 - `POST /human/resolve`: human console for `resolve_dispute`, same shape as the MCP tool (`{disputeId, outcome, refundAmount?, actor?, approvalToken?}`), no CORS. The request always needs header `x-singit-human-secret` equal to `SINGIT_HUMAN_ROUTE_SECRET` (only honored if ≥16 chars), checked first regardless of `approvalToken`. If `approvalToken` is in the body it's passed through as-is (the service HMAC-verifies it); otherwise the server mints the token itself. Missing/wrong header → 401 `HUMAN_AUTH_REQUIRED`; route secret not configured → 403 `HUMAN_ROUTE_DISABLED`; refusal from the service (e.g. a forged/invalid token) → 409 `{ok:false, code, reason}`; bad JSON/amount → 400 `INVALID_INPUT`. Body capped at 64 KB. Success: 200 `{ok:true, dispute, txSig}`.
 - `POST /human/reset` (HTTP only, not an MCP tool): same `x-singit-human-secret` auth as `/human/resolve` (403 `HUMAN_ROUTE_DISABLED` / 401 `HUMAN_AUTH_REQUIRED`; `approvalToken` is not accepted), checked before the mode check. Only works on the mock backend — otherwise 409 `{ok:false, code:"RESET_MOCK_ONLY"}`. Replaces the shared `PaymentService` with a fresh one seeded from `DEFAULT_MOCK_BALANCES`/`SINGIT_MOCK_BALANCES`, records one `"reset"` audit entry, and responds 200 `{ok:true, reset:true, audit}`. Body optional `{actor?: string}`, default `"human"`.
 - Default mock balances (`DEFAULT_MOCK_BALANCES` in `src/backend/mock.ts`, used whenever `SINGIT_MOCK_BALANCES` is unset): `buyer-agent` and `agent:research-bot` 100 USDC; `seller-agent`, `agent:data-vendor` and `agent:gpu-broker` 20 USDC (the dashboard story uses the `agent:` ids).

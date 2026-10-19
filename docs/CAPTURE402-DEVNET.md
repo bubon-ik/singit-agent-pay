@@ -160,6 +160,14 @@ It never returns a terminal `not_found` to PaymentService. The direct evidence
 overload above retains its richer observations. The synchronous factory does not
 silently create or restore a durable journal for the live MCP path.
 
+HTTP and dashboard state expose an explicit public operation view. Prepared
+metadata includes only `txSig`, `holdId` and `lastValidBlockHeight`; signed wires,
+full evidence, salt and idempotency keys stay in the private journal. Redaction
+applies before send and in pending, UNKNOWN, succeeded and failed states, including
+after a retention hook rejects. Reading public state never alters the private
+evidence used for restart recovery or reconciliation. The dashboard also redacts
+records received from an older upstream before caching or publishing them.
+
 The optional `retainBeforeSend(evidence)` dependency runs before any possible
 submission; a sink failure prevents sending. The two live scripts use exclusive
 mode-600 files with file/directory fsync in `SINGIT_EVIDENCE_DIR`, outside Git.
