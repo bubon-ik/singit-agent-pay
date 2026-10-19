@@ -3,7 +3,7 @@
 Implement `PaymentBackend` from [`src/backend/types.ts`](src/backend/types.ts). The MCP server checks every
 mandate rule (budget, per-tx cap, expiry, allowed counterparties, open disputes, human approval) **before**
 it calls the backend. The backend only moves escrowed testnet USDC. `MockBackend` (in-memory) is the reference
-behaviour. `Capture402Backend` is the stub to fill in.
+behaviour. `Capture402Backend` is the stub the teammate fills in (see "For the Capture402Backend implementer").
 
 - **Network:** Solana **devnet only**. Mint: devnet USDC `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` (`DEVNET_USDC_MINT`). Base / EVM is out of scope.
 - **Units:** USDC base units, 6 decimals, `bigint` (1 USDC = `1000000n`). Strings at the MCP boundary only.
@@ -23,6 +23,26 @@ behaviour. `Capture402Backend` is the stub to fill in.
 | `getStatus(holdId)` | read `Payment` account | 176 B, `SACPAY01`: payer, server, mint, salt, maximum, capture_deadline, refund_deadline, held, refundable | – | – |
 
 Not exposed as a tool: `reclaim` (1). The payer can take back an unused hold at or after `captureDeadline`, with no merchant consent needed. This is the payer's safety net if the seller goes silent.
+
+## For the Capture402Backend implementer
+
+`src/backend/capture402.ts` is yours (the teammate's); it is a stub on our side and we will not implement it. Our side ships the contract and the harness:
+
+- **Selection:** `buildBackendFromEnv` in [`src/backend/factory.ts`](src/backend/factory.ts) builds `new Capture402Backend({ rpcUrl, programId, mint: DEVNET_USDC_MINT })` when `SINGIT_BACKEND=capture402`. RPC from `SINGIT_RPC_URL` (default `https://api.devnet.solana.com`); hosts containing `mainnet` are refused (`invalid_network`). Change the constructor if you need to, and update the factory in the same commit.
+- **Keys:** only from the file paths in `SINGIT_PAYER_KEYPAIR` (signs `authorize`) and `SINGIT_MERCHANT_KEYPAIR` (signs capture/void/refund, incl. human-approved refunds). Never generate, store, log or print keys. Missing/unreadable key -> `BackendError` with a clear code.
+- **Contract requirements** (all checked by the conformance suite):
+  1. Shapes as in `types.ts`: `hold` -> `{holdId: payment PDA, txSig}`, writes -> `{txSig}` (devnet signatures), `createMandate` -> `{}` (no-op, mandates stay off-chain).
+  2. `capture` partial with `releaseRemainder:false` leaves `held = maximum - amount`; `releaseRemainder:true` sets `held = 0`. `release` = `void`. `refund` is paid from the merchant ATA, `amount <= refundable`.
+  3. `getStatus` decodes the `Payment` account and returns every `EscrowStatus` field (bigints for amounts, unix-second numbers for deadlines), `null` if the account does not exist.
+  4. **Mint re-check (QA M-2):** `getStatus` must report the **actual on-chain** mint. `PaymentService.hold` re-reads it after `authorize` and refuses `WRONG_MINT` (budget restored, remainder voided, hold never active) unless it equals `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`. Refusing a non-USDC mint before sending is also fine.
+  5. **Refund deadline exposed:** `getStatus().refundDeadline` must be the on-chain `refund_deadline`; `open_dispute` refuses `REFUND_WINDOW_CLOSED` once `now >= refundDeadline`.
+  6. Errors are `BackendError` with `code` = capture402 facilitator reason, with or without the `invalid_auth_capture_svm_` prefix: `amount`, `unexpected_payment_state` (stale `expectedHeld/expectedRefundable`), `capture_deadline_expired`, `refund_deadline_expired`, `payment_not_found`, `empty_hold`, `insufficient_funds`.
+- **Conformance suite:** [`test/backend-contract.ts`](test/backend-contract.ts) `runBackendContract(label, makeFixture)`. `MockBackend` passes it in CI (`test/backend-contract.mock.test.ts`). The devnet run (`test/backend-contract.capture402.test.ts`) is skipped unless all of these are set:
+  `SINGIT_CONTRACT_DEVNET=1 SINGIT_PAYER_KEYPAIR=<path> SINGIT_MERCHANT_KEYPAIR=<path> SINGIT_PAYER_ADDRESS=<pubkey> SINGIT_MERCHANT_ADDRESS=<pubkey> SINGIT_PROGRAM_ID=<id> npx vitest run test/backend-contract.capture402.test.ts`
+  (`SINGIT_CONTRACT_UNIT`, default `100000` = 0.1 USDC per test unit; about 7 holds, so ~0.7 USDC moved and ~0.03 SOL of rent locked). Deadline-expiry and wrong-mint cases run on the mock only.
+- **Smoke:** `npm run devnet:smoke` ([`scripts/devnet-smoke.ts`](scripts/devnet-smoke.ts)). With no env it prints a preflight checklist and exits 1 without sending anything. With the env above (+ `SINGIT_BACKEND=capture402`) it checks the devnet genesis hash and SOL/USDC balances, then hold 1 USDC -> capture 0.6 -> release 0.4 -> getStatus, printing explorer links (`?cluster=devnet`). Exit 2 means the backend is still the stub.
+- **Program id: to confirm with teammate.** No devnet program id is committed in capture402-solana @ `236b09a44240d285ee6f33d2e8dac79f81058e3d`. The accepted Devnet deployment id is loaded at runtime from a deployment record (`/etc/capture402/deployment-identity.v1.json` via `SAC006_DEPLOYMENT_RECORD_PATH`: `integration/operators/lib.ts:52`, parsed at `integration/src/deployment-record.ts:121`), which is not in the repo. The only ids in the repo are test fixtures, **not** deployments: `3uWi9x2SRpmjztkpkr2WWeBoVq3exjXG2YfDWLvm8KsQ` (`integration/test/rpc-ledger.test.ts:42`, `integration/test/client.test.ts:12`, `integration/test/fixtures/operational-fixture.ts:20`), `992QmwmwCebawRJsTCgvc8qnzGivbFaD39ZQE7VhHp7o` (`ops/test_reconcile_wire.py:17`), and the harness id `[42;32]` (`src/lib.rs:18`, `LOCAL_PROGRAM_ID` in `integration/src/program.ts`).
+- **Faucet mint:** the capture402 devnet faucet mints its own test token; our service only accepts devnet USDC `4zMMC9…`. Fund the payer with devnet USDC (e.g. Circle faucet), or agree on a change.
 
 ## Mandate rules (enforced by `PaymentService` before any backend call)
 
@@ -90,7 +110,7 @@ Amounts are base-unit decimal strings (`"2500000"` = 2.5 USDC). Times are intege
 ## Transports
 - stdio (default): `npx tsx src/index.ts`
 - streamable HTTP: `--http` or `SINGIT_MCP_HTTP=1`. Binds `127.0.0.1`, **port 8787** (override with `PORT`), path `/mcp`, `GET /health`. Stateless, with one shared in-memory state per process.
-- Backend: `SINGIT_BACKEND=mock` (default) or `capture402` (stub, uses `SINGIT_RPC_URL`, `SINGIT_PROGRAM_ID`). `SINGIT_MOCK_BALANCES='{"buyer-agent":"100000000"}'`.
+- Backend: `SINGIT_BACKEND=mock` (default) or `capture402` (teammate's, stub until it lands; built by `buildBackendFromEnv` from `SINGIT_RPC_URL`, `SINGIT_PROGRAM_ID`, mainnet RPC refused). `SINGIT_MOCK_BALANCES='{"buyer-agent":"100000000"}'`.
 - HTTP handler lives in `src/http.ts` (`createHttpHandler`); `src/index.ts` just wires env/backend into it. Two rate-limit buckets, each its own `createRateLimiter` instance keyed by `cf-connecting-ip` header ?? socket address: `"mcp"` (`SINGIT_RATE_LIMIT_PER_MIN`, default 120) covers `/mcp` and `/human/resolve`; `"state"` (`SINGIT_STATE_RATE_LIMIT_PER_MIN`, default 600) covers `GET /api/state`. Over the limit: `429 {ok:false, error:"rate limited"}` with `Retry-After: 60`.
 - `GET /api/state`: dashboard snapshot — `{v: 1, backend, mandates, disputes, audit, holds}` (bigints as decimal strings; `holds` is every hold across all mandates). `Access-Control-Allow-Origin: *` (read-only, GET only).
 - `POST /human/resolve`: human console for `resolve_dispute`, same shape as the MCP tool (`{disputeId, outcome, refundAmount?, actor?, approvalToken?}`), no CORS. The request always needs header `x-singit-human-secret` equal to `SINGIT_HUMAN_ROUTE_SECRET` (only honored if ≥16 chars), checked first regardless of `approvalToken`. If `approvalToken` is in the body it's passed through as-is (the service HMAC-verifies it); otherwise the server mints the token itself. Missing/wrong header → 401 `HUMAN_AUTH_REQUIRED`; route secret not configured → 403 `HUMAN_ROUTE_DISABLED`; refusal from the service (e.g. a forged/invalid token) → 409 `{ok:false, code, reason}`; bad JSON/amount → 400 `INVALID_INPUT`. Body capped at 64 KB. Success: 200 `{ok:true, dispute, txSig}`.
