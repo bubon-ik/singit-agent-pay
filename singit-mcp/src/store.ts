@@ -114,12 +114,24 @@ export interface Snapshot {
   seqs: Seqs;
 }
 
+/** Atomic commit of a terminal op outcome plus the hold/mandate snapshot(s) it produced, written
+ * as a single durable record keyed by op.id. Replay applies op/hold/mandate together or not at
+ * all: there is no window where the mutation is durable but the op is not (or vice versa), so
+ * reconcile (which only ever acts on non-terminal ops) can never re-apply an already-committed
+ * delta. */
+export interface OpCommit {
+  op: OperationRecord;
+  mandate?: StoredMandate;
+  hold?: StoredHold;
+}
+
 export interface StateStore {
   load(): Snapshot;
   putMandate(m: StoredMandate): void;
   putHold(h: StoredHold): void;
   putDispute(d: StoredDispute): void;
   putOp(op: OperationRecord): void;
+  putOpCommit(commit: OpCommit): void;
   appendAudit(e: AuditEntry): void;
 }
 
@@ -169,12 +181,23 @@ export class MemoryStateStore implements StateStore {
   putOp(op: OperationRecord): void {
     this.ops.set(op.id, op);
   }
+  putOpCommit(commit: OpCommit): void {
+    this.ops.set(commit.op.id, commit.op);
+    if (commit.mandate) this.mandates.set(commit.mandate.id, commit.mandate);
+    if (commit.hold) this.holds.set(commit.hold.id, commit.hold);
+  }
   appendAudit(e: AuditEntry): void {
     this.audit.push(e);
   }
 }
 
-type RecordLine = { t: "mandate"; v: 1; data: StoredMandate } | { t: "hold"; v: 1; data: StoredHold } | { t: "dispute"; v: 1; data: StoredDispute } | { t: "op"; v: 1; data: OperationRecord } | { t: "audit"; v: 1; data: AuditEntry };
+type RecordLine =
+  | { t: "mandate"; v: 1; data: StoredMandate }
+  | { t: "hold"; v: 1; data: StoredHold }
+  | { t: "dispute"; v: 1; data: StoredDispute }
+  | { t: "op"; v: 1; data: OperationRecord }
+  | { t: "audit"; v: 1; data: AuditEntry }
+  | { t: "opcommit"; v: 1; data: OpCommit };
 
 /**
  * Append-only JSONL durable store: one `state.jsonl` file per dir, one JSON object per line.
@@ -251,6 +274,11 @@ export class FileStateStore implements StateStore {
         case "audit":
           auditBySeq.set(rec.data.seq, rec.data);
           break;
+        case "opcommit":
+          ops.set(rec.data.op.id, rec.data.op);
+          if (rec.data.mandate) mandates.set(rec.data.mandate.id, rec.data.mandate);
+          if (rec.data.hold) holds.set(rec.data.hold.id, rec.data.hold);
+          break;
       }
     }
 
@@ -276,6 +304,9 @@ export class FileStateStore implements StateStore {
   }
   putOp(op: OperationRecord): void {
     this.appendLine({ t: "op", v: 1, data: op });
+  }
+  putOpCommit(commit: OpCommit): void {
+    this.appendLine({ t: "opcommit", v: 1, data: commit });
   }
   appendAudit(e: AuditEntry): void {
     this.appendLine({ t: "audit", v: 1, data: e });

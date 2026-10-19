@@ -546,7 +546,16 @@ export class PaymentService {
     }
   }
 
-  private finalizeOpSucceeded(op: OperationRecord, result: { holdId?: string; txSig?: string }, holdIdForLock: string | null): void {
+  /** `mutated`, if given, is the hold/mandate this op's success produced: it is committed in the
+   * SAME durable record as the op's terminal state (see StateStore.putOpCommit), so a crash can
+   * never leave the mutation persisted without the op terminal (or vice versa) — the exact gap
+   * that let reconcile re-apply an already-applied delta. */
+  private finalizeOpSucceeded(
+    op: OperationRecord,
+    result: { holdId?: string; txSig?: string },
+    holdIdForLock: string | null,
+    mutated?: { hold?: Hold; mandate?: Mandate },
+  ): void {
     op.state = "succeeded";
     // Confirmed holds are represented by mandate.committed; only unresolved holds
     // count as reservations in the operation journal.
@@ -554,7 +563,15 @@ export class PaymentService {
     op.result = result;
     op.updatedAt = this.now();
     if (holdIdForLock && this.holdLocks.get(holdIdForLock) === op.id) this.holdLocks.delete(holdIdForLock);
-    this.store.putOp(op);
+    if (mutated?.hold || mutated?.mandate) {
+      this.store.putOpCommit({
+        op,
+        hold: mutated.hold ? serializeHold(mutated.hold) : undefined,
+        mandate: mutated.mandate ? serializeMandate(mutated.mandate) : undefined,
+      });
+    } else {
+      this.store.putOp(op);
+    }
   }
 
   /**
@@ -595,7 +612,9 @@ export class PaymentService {
     canonicalParams: Record<string, unknown>;
     expected: { held: string; refundable: string };
     call: (ctx: SubmitContext) => Promise<TxReceipt>;
-    applyMutation: (receipt: TxReceipt) => void;
+    /** Mutates opts.hold (and/or the mandate) in place; must NOT persist anything itself, since
+     * executeHoldOp commits the mutation and the op's terminal state atomically. */
+    applyMutation: (receipt: TxReceipt) => { mandate?: Mandate } | void;
   }): Promise<{ hold: Hold; replay: boolean; op: OperationRecord }> {
     const key = this.scopedKey(opts.action, opts.actor, opts.idempotencyKey);
     const canonical = canonicalize(opts.canonicalParams);
@@ -623,8 +642,8 @@ export class PaymentService {
     });
 
     const receipt = await this.submit(op, opts.hold.id, opts.call);
-    opts.applyMutation(receipt);
-    this.finalizeOpSucceeded(op, { txSig: receipt.txSig }, opts.hold.id);
+    const extra = opts.applyMutation(receipt);
+    this.finalizeOpSucceeded(op, { txSig: receipt.txSig }, opts.hold.id, { hold: opts.hold, mandate: extra?.mandate });
     return { hold: opts.hold, replay: false, op };
   }
 
@@ -669,8 +688,10 @@ export class PaymentService {
     this.store.putOp(op);
   }
 
-  /** Applies the action-specific hold/mandate mutation once reconcile has confirmed an op executed. */
-  private applyHoldMutationForOp(op: OperationRecord, hold: Hold): void {
+  /** Computes the action-specific hold/mandate mutation once reconcile has confirmed an op
+   * executed. Mutates `hold` in place and returns the mandate it touched (if any); does NOT
+   * persist — the caller commits both atomically with the op's terminal state. */
+  private applyHoldMutationForOp(op: OperationRecord, hold: Hold): Mandate | undefined {
     const p = op.params as Record<string, unknown>;
     switch (op.action) {
       case "capture": {
@@ -681,12 +702,10 @@ export class PaymentService {
           const remainder = hold.held;
           hold.held = 0n;
           const mandate = this.mandates.get(op.mandateId);
-          if (mandate) {
-            mandate.committed -= remainder;
-            this.store.putMandate(serializeMandate(mandate));
-          }
+          if (mandate) mandate.committed -= remainder;
+          return mandate;
         }
-        break;
+        return undefined;
       }
       case "release":
       case "resolve_release":
@@ -694,22 +713,18 @@ export class PaymentService {
         const released = hold.held;
         hold.held = 0n;
         const mandate = this.mandates.get(op.mandateId);
-        if (mandate) {
-          mandate.committed -= released;
-          this.store.putMandate(serializeMandate(mandate));
-        }
-        break;
+        if (mandate) mandate.committed -= released;
+        return mandate;
       }
       case "refund":
       case "resolve_refund": {
         const amount = BigInt(p.amount as string);
         hold.refunded += amount;
-        break;
+        return undefined;
       }
       default:
-        break;
+        return undefined;
     }
-    this.store.putHold(serializeHold(hold));
   }
 
   /** Applies the effect of a confirmed-executed capture/release/refund/resolve-release/
@@ -735,8 +750,8 @@ export class PaymentService {
       return false;
     }
 
-    this.applyHoldMutationForOp(op, hold);
-    this.finalizeOpSucceeded(op, { txSig }, op.holdId);
+    const mandate = this.applyHoldMutationForOp(op, hold);
+    this.finalizeOpSucceeded(op, { txSig }, op.holdId, { hold, mandate });
     return true;
   }
 
@@ -1406,16 +1421,14 @@ export class PaymentService {
           hold.lastTxSig = receipt.txSig;
           hold.held -= amount;
           hold.captured += amount;
+          let mandate: Mandate | undefined;
           if (releaseRemainder && hold.held > 0n) {
             const remainder = hold.held;
             hold.held = 0n;
-            const mandate = this.mandates.get(hold.mandateId);
-            if (mandate) {
-              mandate.committed -= remainder;
-              this.store.putMandate(serializeMandate(mandate));
-            }
+            mandate = this.mandates.get(hold.mandateId);
+            if (mandate) mandate.committed -= remainder;
           }
-          this.store.putHold(serializeHold(hold));
+          return { mandate };
         },
       });
 
@@ -1486,11 +1499,8 @@ export class PaymentService {
           const released = hold.held;
           hold.held = 0n;
           const mandate = this.mandates.get(hold.mandateId);
-          if (mandate) {
-            mandate.committed -= released;
-            this.store.putMandate(serializeMandate(mandate));
-          }
-          this.store.putHold(serializeHold(hold));
+          if (mandate) mandate.committed -= released;
+          return { mandate };
         },
       });
 
@@ -1565,7 +1575,6 @@ export class PaymentService {
           hold.txSigs.push(receipt.txSig);
           hold.lastTxSig = receipt.txSig;
           hold.refunded += amount;
-          this.store.putHold(serializeHold(hold));
         },
       });
 
@@ -1738,11 +1747,8 @@ export class PaymentService {
             const released = hold.held;
             hold.held = 0n;
             const mandate = this.mandates.get(hold.mandateId);
-            if (mandate) {
-              mandate.committed -= released;
-              this.store.putMandate(serializeMandate(mandate));
-            }
-            this.store.putHold(serializeHold(hold));
+            if (mandate) mandate.committed -= released;
+            return { mandate };
           },
         });
         releaseTxSig = releaseTxSig ?? op.result?.txSig ?? null;
@@ -1771,7 +1777,6 @@ export class PaymentService {
             hold.lastTxSig = receipt.txSig;
             dispute.txSigs.push(receipt.txSig);
             hold.refunded += requested;
-            this.store.putHold(serializeHold(hold));
           },
         });
         refundTxSig = refundTxSig ?? op.result?.txSig ?? null;
