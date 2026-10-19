@@ -63,7 +63,7 @@ export interface AuditEntry {
   disputeId: string | null;
   /** USDC base units (6 decimals) as a decimal string. */
   amount: string | null;
-  /** Devnet tx signature (or mock id) when money moved, else null. */
+  /** When money moved: mock ref (mock-tx-N) until Capture402Backend is wired to devnet, then the devnet tx signature. Else null. */
   txSig: string | null;
   /** Escrow state AFTER the call (base-unit strings), when a hold is involved. */
   held: string | null;

@@ -8,7 +8,7 @@ Two autonomous agents pay each other in devnet USDC. A human sets the mandate, a
 - **Seller agent / service** (SingIt) captures what it delivered, releases the rest and refunds.
 - **SingIt MCP server** (`singit-mcp`, built here). Its **mandate engine** (`PaymentService`) enforces budget, per-tx cap, expiry, counterparties, mint and deadline sanity, plus disputes and the **audit log**. It is exposed as MCP tools over stdio or streamable HTTP.
 - **PaymentBackend** is the contract (`INTERFACE.md`). Implementations are `MockBackend` (in-memory, demo/tests) and `Capture402Backend` → **capture402-solana** escrow program on **Solana devnet** (teammate).
-- **Demo dashboard** (Demo/QA agent) shows the timeline, audit log and BLOCKED events, with an explorer link per `txSig`. It doubles as the human approval console.
+- **Demo dashboard** (Demo/QA agent) shows the timeline, audit log and BLOCKED events, with a tx ref per step (`txSig` is a mock ref (`mock-tx-N`) until `Capture402Backend` is wired to devnet; only then it is a devnet signature that links to the Solana explorer (`https://explorer.solana.com/tx/<sig>?cluster=devnet`)). It doubles as the human approval console.
 
 ```mermaid
 flowchart LR
@@ -61,7 +61,7 @@ sequenceDiagram
 | Deadline sanity (seconds not ms, max 7-day hold, refund window ≥ 1 h) | **Off-chain** (QA M-3). |
 | A capture can never exceed the hold. Funds are locked until capture/void/reclaim. Refund only before the refund deadline. | **On-chain**: immutable `maximum` and deadlines in the capture402 escrow. |
 | Payer reclaims an unused hold if the seller vanishes | **On-chain** `reclaim`, at or after the capture deadline, with no merchant consent needed. |
-| Dispute resolution | **Off-chain plus a human.** capture402 has no arbiter (QA H-1). `resolve_dispute` requires an HMAC approval token tied to *(dispute, outcome, amount)*. Only the human holds `SINGIT_HUMAN_APPROVAL_SECRET` (CLI `npm run approve` or the dashboard console). No MCP tool returns the secret or a token, so an agent cannot approve itself or change the amount. The refund is then signed with the merchant key held by the backend. |
+| Dispute resolution | **Off-chain plus a human.** capture402 has no arbiter (QA H-1). `resolve_dispute` requires an HMAC approval token tied to *(dispute, outcome, amount)*. Only the human holds `SINGIT_HUMAN_APPROVAL_SECRET` (CLI `npm run approve` or the dashboard console). No MCP tool returns the secret or a token, so an agent cannot approve itself or change the amount. The refund is then signed with the merchant key held by the backend (devnet throwaway keypairs generated locally by the team, loaded from env (`SINGIT_PAYER_KEYPAIR` / `SINGIT_MERCHANT_KEYPAIR`), never committed; agents never see keys). |
 
 Every call, whether executed or **blocked**, writes an audit row: actor, action, outcome, code, reason, amounts, `txSig`, held/refundable after.
 

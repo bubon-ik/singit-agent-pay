@@ -50,7 +50,7 @@ export interface HoldRequest {
 export interface HoldReceipt {
   /** capture402: the payment PDA address. Used as the id for every later call. */
   holdId: string;
-  /** Transaction signature (devnet) or mock id. Goes into the audit log (the program emits no logs, QA L-2). */
+  /** Mock ref (mock-tx-N) until Capture402Backend is wired to devnet; then the devnet tx signature. Goes into the audit log (the program emits no logs, QA L-2). */
   txSig: string;
 }
 
@@ -83,7 +83,7 @@ export interface RefundRequest extends StateGuard {
 }
 
 export interface TxReceipt {
-  /** Transaction signature (devnet) or mock id. */
+  /** Mock ref (mock-tx-N) until Capture402Backend is wired to devnet; then the devnet tx signature. */
   txSig: string;
 }
 

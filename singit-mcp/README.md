@@ -100,7 +100,7 @@ For mock payer balances, set `SINGIT_MOCK_BALANCES` to a JSON object of addresse
 
 ## Safety
 
-This project targets Solana devnet and devnet USDC only. Use throwaway devnet keys; never use real keys or put keys in this repository. The MCP server never needs the human approval secret on the agent side.
+This project targets Solana devnet and devnet USDC only. Keys: devnet throwaway keypairs generated locally by the team, loaded from env (`SINGIT_PAYER_KEYPAIR` / `SINGIT_MERCHANT_KEYPAIR`), never committed; agents never see keys. Never real or mainnet keys. `txSig` is a mock ref (`mock-tx-N`) until `Capture402Backend` is wired to devnet; only then it is a devnet signature that links to the Solana explorer (`https://explorer.solana.com/tx/<sig>?cluster=devnet`). The MCP server never needs the human approval secret on the agent side.
 
 ## Built during the hackathon
 

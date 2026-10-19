@@ -46,7 +46,7 @@ export interface Hold {
   refunded: bigint;
   captureDeadline: number;
   refundDeadline: number;
-  /** All tx signatures for this hold, oldest first (devnet signatures, or mock ids). */
+  /** All tx signatures for this hold, oldest first (mock refs mock-tx-N until Capture402Backend is wired to devnet, then devnet signatures). */
   txSigs: string[];
   /** Signature of the most recent tx on this hold (for explorer links). */
   lastTxSig: string | null;

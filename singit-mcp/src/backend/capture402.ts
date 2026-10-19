@@ -3,9 +3,10 @@
  * the on-chain wiring is filled in. See INTERFACE.md for the instruction/account tables and
  * /tmp/capture402-solana (integration/src/transactions.ts, program.ts) for the TS helpers.
  *
- * Devnet only. Never generate or store keypairs in this repo: SINGIT_MERCHANT_KEYPAIR (server/
- * merchant signer, used by capture/release/refund and human-approved refunds) and
- * SINGIT_PAYER_KEYPAIR (payer signer, used by hold) are devnet throwaways supplied by a teammate.
+ * Devnet only. Keys: devnet throwaway keypairs generated locally by the team, loaded from env
+ * (SINGIT_PAYER_KEYPAIR / SINGIT_MERCHANT_KEYPAIR), never committed; agents never see keys.
+ * SINGIT_PAYER_KEYPAIR signs hold (authorize); SINGIT_MERCHANT_KEYPAIR signs capture/release/refund,
+ * including human-approved refunds. This code never generates or stores keys.
  */
 import {
   BackendError,
@@ -45,7 +46,7 @@ export class Capture402Backend implements PaymentBackend {
     // Data (67 B): [0, version=1, escrow=0, fee=0:u64, salt:32, maximum:u64, captureDeadline:i64, refundDeadline:i64]
     // Accounts: payer(s,w), server=req.payee, payment PDA(w), mint, payer ATA(w),
     //           vault(w) = ATA(payment PDA, mint), rent funder(s,w), System, Token, ATA program.
-    // 1. Load the payer KeyPairSigner from env SINGIT_PAYER_KEYPAIR (devnet throwaway).
+    // 1. Load the payer KeyPairSigner from env SINGIT_PAYER_KEYPAIR (devnet throwaway, never committed).
     // 2. salt = Buffer.from(req.salt, "hex"); payment = await paymentAddress(programId, payer, salt) (program.ts).
     // 3. instruction = await authorizeInstruction({ programId, payer, server: req.payee, mint, funder: payer,
     //      salt, maximum: req.maximum, captureDeadline: BigInt(req.captureDeadline), refundDeadline: BigInt(req.refundDeadline) })

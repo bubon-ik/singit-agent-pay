@@ -11,7 +11,7 @@ behaviour. `Capture402Backend` is the stub to fill in.
 - **holdId:** the capture402 **payment PDA** = `PDA(["auth-capture-v1", payer, salt], programId)`; vault = ATA(payment PDA, mint).
 - **expectedHeld / expectedRefundable:** passed straight into capture/void/refund data. The program rejects the tx if on-chain state differs.
 - **Off-chain only (no instruction):** mandates, per-tx caps, counterparty lists, disputes, human approval, audit log.
-- **Receipts:** `hold` returns `{holdId, txSig}`, the other writes return `{txSig}`. `txSig` is the devnet signature and is written to the audit log.
+- **Receipts:** `hold` returns `{holdId, txSig}`, the other writes return `{txSig}`. `txSig` is a mock ref (`mock-tx-N`) until `Capture402Backend` is wired to devnet; only then it is a devnet signature that links to the Solana explorer (`https://explorer.solana.com/tx/<sig>?cluster=devnet`). It is written to the audit log.
 
 | Method | capture402 instruction (tag) | Data after tag | Accounts (s = signer, w = writable) | Signs |
 |---|---|---|---|---|
@@ -41,7 +41,7 @@ The program has no aggregate budget, no per-tx cap, no mint pin, no deadline bou
 | 9 | Refund: caller = payee, `amount <= captured - refunded`, `now < refundDeadline` | `REFUND_EXCEEDS_CAPTURED`, `REFUND_DEADLINE_PASSED` | – |
 | 10 | Dispute: only the hold's payer opens it; it freezes captures. `resolve_dispute` needs a **human approval token**, an HMAC over `(disputeId, outcome, refundAmount)` keyed by `SINGIT_HUMAN_APPROVAL_SECRET` and issued with `npm run approve`. No MCP tool can produce it. "refund" releases what is still held (void) and then calls `refund`, signed by the merchant key the backend holds. "reject" sends no tx. | `HUMAN_APPROVAL_REQUIRED` | H-1 |
 
-**Merchant signer (H-1):** the program has no arbiter, so a human-approved refund is executed with the **merchant/server key** held by the backend. `Capture402Backend` loads that key from env (`SINGIT_MERCHANT_KEYPAIR`, a devnet throwaway, supplied by the teammate). The service never generates or stores keys.
+**Merchant signer (H-1):** the program has no arbiter, so a human-approved refund is executed with the **merchant/server key** held by the backend. Keys: devnet throwaway keypairs generated locally by the team, loaded from env (`SINGIT_PAYER_KEYPAIR` / `SINGIT_MERCHANT_KEYPAIR`), never committed; agents never see keys. The service never generates or stores keys.
 
 ## Audit log (stable, consumed by the dashboard)
 
@@ -62,7 +62,7 @@ Schema: `AuditEntry` in [`src/audit.ts`](src/audit.ts). Fields are only ever add
 
 **TS helpers to reuse** (capture402 `integration/src`): `authorizeInstruction`, `captureInstruction`, `voidInstruction`, `refundInstruction` (transactions.ts), and `paymentAddress`, `ata`, `decodePayment` (program.ts).
 
-Devnet/test keys only. Never real keys. Never commit keypairs.
+Keys: devnet throwaway keypairs generated locally by the team, loaded from env (`SINGIT_PAYER_KEYPAIR` / `SINGIT_MERCHANT_KEYPAIR`), never committed; agents never see keys. Never real or mainnet keys.
 
 ## MCP tools (schemas: `toolSchemas` in [`src/server.ts`](src/server.ts), zod)
 
@@ -84,7 +84,7 @@ Amounts are base-unit decimal strings (`"2500000"` = 2.5 USDC). Times are intege
 
 - **Refusal:** `isError: true`, `{ok: false, code, reason}`. The same object is in `structuredContent` and as JSON text in `content`.
 - **Hold object:** `id, mandateId, payer, payee, mint, maximum, held, captured, refunded, captureDeadline, refundDeadline, txSigs[], lastTxSig, disputeId?`.
-- **txSig / txRef:** a devnet signature (explorer: `https://explorer.solana.com/tx/<sig>?cluster=devnet`), or `mock-tx-N` from MockBackend. It appears in the tool result, in `hold.txSigs`/`lastTxSig`, in `dispute.txSigs`, and in the audit `txSig`.
+- **txSig / txRef:** `txSig` is a mock ref (`mock-tx-N`) until `Capture402Backend` is wired to devnet; only then it is a devnet signature that links to the Solana explorer (`https://explorer.solana.com/tx/<sig>?cluster=devnet`). It appears in the tool result, in `hold.txSigs`/`lastTxSig`, in `dispute.txSigs`, and in the audit `txSig`.
 - **Approval token:** `issueApprovalToken(secret, {disputeId, outcome, refundAmount})` in `src/approval.ts`. It is HMAC-SHA256 over `singit-dispute-v1|disputeId|outcome|amount`, and the amount is forced to 0 for `reject`. CLI: `SINGIT_HUMAN_APPROVAL_SECRET=… npm run approve -- d-1 refund 2500000`.
 
 ## Transports
