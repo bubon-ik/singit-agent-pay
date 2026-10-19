@@ -1,0 +1,29 @@
+# dependencies / build
+node_modules/
+dist/
+*.tsbuildinfo
+*.log
+# secrets: never commit
+.env
+.env.*
+!.env.example
+!*.env.example
+*.keypair*
+*keypair*.json
+keypairs/
+id.json
+*.pem
+*.key
+# agent tooling
+.mcp.json
+.claude/
+.codex/
+# large media (use a release asset / Git LFS instead)
+*.mp4
+*.mov
+*.gif
+demo-dashboard/backup/
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

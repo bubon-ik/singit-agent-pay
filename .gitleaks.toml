@@ -1,0 +1,8 @@
+# gitleaks config: default rules, plus an allowlist for the fixed, test-only
+# HMAC/route secrets used by singit-mcp unit tests (not real credentials).
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "test-only secrets in singit-mcp unit tests"
+paths = ['''^singit-mcp/test/[^/]+\.test\.ts$''']

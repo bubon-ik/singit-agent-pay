@@ -1,0 +1,21 @@
+{
+  "name": "singit-agent-pay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agents that pay each other: MCP server with programmable USDC mandates, escrow holds and human-approved disputes (FinTechers Prague hackathon, Track 2)",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": "^20.0.0 || ^22.0.0 || >=24.0.0"
+  },
+  "scripts": {
+    "postinstall": "npm --prefix singit-mcp ci --no-audit --no-fund",
+    "demo:all": "bash singit-mcp/scripts/demo-all.sh",
+    "demo": "npm --prefix singit-mcp run demo",
+    "test": "npm --prefix singit-mcp test && npm --prefix demo-dashboard run test:e2e",
+    "test:mcp": "npm --prefix singit-mcp test",
+    "test:dashboard": "npm --prefix demo-dashboard run test:e2e",
+    "typecheck": "npm --prefix singit-mcp run typecheck",
+    "start:http": "npm --prefix singit-mcp run start:http",
+    "approve": "npm --prefix singit-mcp run approve --"
+  }
+}
