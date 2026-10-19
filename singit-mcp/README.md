@@ -12,6 +12,31 @@ npm run demo
 
 `npm run demo:all` starts the MCP HTTP server and the demo dashboard from `../demo-dashboard`.
 
+## Run the demo on your laptop
+
+**Prereqs:** macOS or Linux, Node 22 or 20 (`nvm use` reads `.nvmrc`), and `singit-mcp/` and `demo-dashboard/` side by side in one folder. No Solana wallet or keys needed: it runs on the mock backend.
+
+```sh
+cd singit-mcp && npm run demo:all
+```
+
+On the first run this installs dependencies (`npm ci`) and writes local dev secrets to a gitignored `.env.local` (`SINGIT_HUMAN_APPROVAL_SECRET`, `SINGIT_HUMAN_ROUTE_SECRET`). It then starts both processes and prints:
+
+```
+  MCP (streamable HTTP): http://127.0.0.1:8787/mcp
+  State (JSON):          http://127.0.0.1:8787/api/state
+  Dashboard:             http://127.0.0.1:5173
+```
+
+Open the dashboard and run the story. `Ctrl-C` stops both processes.
+
+**Troubleshooting**
+- `Node vX is not supported`: run `nvm install 22 && nvm use 22`.
+- `port 8787 is in use` (or 5173): stop the other process (`lsof -i :8787`), or run `MCP_PORT=8788 DASH_PORT=5174 npm run demo:all`.
+- `npm ci failed`: check your network, then `rm -rf node_modules && npm run demo:all`.
+- Approvals failing after you copied the folder: delete `.env.local` to regenerate the secrets.
+- `/api/state` is read-only (600 requests/min bucket). Human approve/reject goes through `POST /human/resolve` with the `x-singit-human-secret` header (see INTERFACE.md).
+
 ## Run
 
 - **stdio:** `npx tsx src/index.ts`
