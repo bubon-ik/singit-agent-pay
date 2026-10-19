@@ -68,7 +68,7 @@ claude mcp add singit -- npx tsx /ABS/PATH/singit-mcp/src/index.ts
 
 ## Tools
 
-Amounts are USDC base units as decimal strings (`2500000` = 2.5 USDC); times are Unix seconds. Every write takes an `actor` identifying the calling agent. **`hold` is the pay tool.**
+Amounts are USDC base units as decimal strings (`2500000` = 2.5 USDC); times are Unix seconds. The caller's role comes from its bearer token (or `SINGIT_MCP_PRINCIPAL` on stdio); `actor` is optional and informational. **`hold` is the pay tool.**
 
 | Tool | What it does |
 | --- | --- |

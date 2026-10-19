@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 PORT=${PORT:-5199}; export PORT; U="http://127.0.0.1:$PORT"
 CHROME=${CHROME:-$(command -v google-chrome || command -v chromium || command -v chromium-browser)}
 mkdir -p screenshots
-LOG="$(mktemp "${TMPDIR:-/tmp}/singit-dashboard-shot.XXXXXX.log")"
+LOG="$(mktemp "${TMPDIR:-/tmp}/singit-dashboard-shot.XXXXXX")"  # BSD mktemp only randomizes trailing Xs
 # Pass SINGIT_MCP_URL and SINGIT_HUMAN_ROUTE_SECRET through so the same script works
 # in mcp-http mode against a running singit-mcp HTTP server.
 export SINGIT_MCP_URL SINGIT_HUMAN_ROUTE_SECRET

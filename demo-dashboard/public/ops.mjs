@@ -60,7 +60,8 @@ export function opsView(ops, now = Date.now()) {
     const errorCode = op.error?.refusalCode ?? op.error?.code;
     const labels = { pending: "PENDING", unknown: "OUTCOME UNKNOWN — funds reserved, reconciling", succeeded: "SUCCEEDED", failed: `FAILED${errorCode ? ` · ${errorCode}` : ""}` };
     const params = op.params ?? {};
-    const rawAmount = params.amount ?? params.refundAmount ?? op.expected?.held;
+    // expected.held is the hold's balance AFTER the op, not its amount (always 0 after a release), so it is never shown.
+    const rawAmount = params.amount ?? params.refundAmount;
     const txSig = op.prepared?.txSig ?? op.result?.txSig ?? null;
     return {
       id: op.id, action, state,
