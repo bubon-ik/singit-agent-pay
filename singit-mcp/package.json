@@ -1,0 +1,33 @@
+{
+  "name": "singit-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server for agent-to-agent stablecoin payments with programmable mandates (FinTechers hackathon, Track 2)",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "singit-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "typecheck": "tsc -p . --noEmit",
+    "start": "tsx src/index.ts",
+    "start:http": "tsx src/index.ts --http",
+    "test": "vitest run",
+    "demo": "tsx scripts/demo.ts",
+    "approve": "tsx scripts/approve.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.12"
+  }
+}
