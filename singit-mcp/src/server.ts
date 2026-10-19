@@ -7,7 +7,66 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { AmountError, parseUsdc } from "./amount.js";
-import { PaymentService, Refusal } from "./service.js";
+import type { Principal } from "./principal.js";
+import { type Mandate, PaymentService, Refusal } from "./service.js";
+
+type GuardedAction = "hold" | "capture" | "release" | "refund" | "open_dispute";
+/** Which agent role may perform each mutating action (MVP-01). Mandate issuance and dispute resolution are human-only. */
+const ROLE_FOR: Record<GuardedAction, ReadonlyArray<Principal["role"]>> = {
+  hold: ["buyer"],
+  open_dispute: ["buyer"],
+  capture: ["merchant"],
+  refund: ["merchant"],
+  release: ["buyer", "merchant"],
+};
+
+function forbidden(message: string): Refusal {
+  return new Refusal("PRINCIPAL_FORBIDDEN", message);
+}
+
+/** Authorization checks bound to the trusted principal. All run before any backend call. */
+export function makeGuard(service: PaymentService, principal: Principal | undefined) {
+  const canSee = (m: Mandate): boolean =>
+    !principal || m.payer === principal.id || m.allowedCounterparties.includes(principal.id);
+  const visibleMandateIds = (): Set<string> =>
+    new Set(service.listMandates().filter((v) => canSee(v.mandate)).map((v) => v.mandate.id));
+  return {
+    mandateIssuance(): void {
+      if (principal) {
+        throw forbidden("mandates are issued only by the human control path (POST /human/mandate), never by an agent principal");
+      }
+    },
+    humanOnly(what: string): void {
+      if (principal) throw forbidden(`${what} is human-only; use the /human/* routes or \`npm run approve\``);
+    },
+    actorFor(action: GuardedAction, claimed: string | undefined, ref: { mandateId?: string; holdId?: string }): string {
+      if (!principal) return claimed ?? "";
+      if (!ROLE_FOR[action].includes(principal.role)) {
+        throw forbidden(`${principal.role} principal may not ${action}`);
+      }
+      if (claimed !== undefined && claimed !== principal.id) {
+        throw forbidden("actor does not match the authenticated principal");
+      }
+      const mandate = ref.mandateId
+        ? service.getMandate(ref.mandateId).mandate
+        : service.getMandate(service.getHold(ref.holdId!).mandateId).mandate;
+      if (!canSee(mandate)) throw forbidden("object belongs to another principal");
+      return principal.id;
+    },
+    mandateView<T extends { mandate: Mandate }>(view: T): T {
+      if (!canSee(view.mandate)) throw forbidden("mandate belongs to another principal");
+      return view;
+    },
+    filterMandates<T extends { mandate: Mandate }>(views: T[]): T[] {
+      return views.filter((v) => canSee(v.mandate));
+    },
+    filterByMandate<T extends { mandateId?: string | null }>(items: T[]): T[] {
+      if (!principal) return items;
+      const ids = visibleMandateIds();
+      return items.filter((i) => typeof i.mandateId === "string" && ids.has(i.mandateId));
+    },
+  };
+}
 
 /** Recursively converts bigints to strings so the result is both JSON.stringify-able and a valid structuredContent object. */
 function toJSON(value: unknown): unknown {
@@ -50,7 +109,10 @@ async function run(fn: () => Promise<Record<string, unknown>>): Promise<CallTool
 }
 
 const amount = z.string().describe('USDC base units (6 decimals) as a decimal string, e.g. "1250000" = 1.25 USDC');
-const actor = z.string().describe("The calling agent's id/address.");
+const actor = z
+  .string()
+  .optional()
+  .describe("Optional, informational only. With an authenticated principal it must equal the principal's own id; it never grants authority.");
 const mandateId = z.string().describe("Mandate id, e.g. m-1.");
 const holdId = z.string().describe("Hold id (capture402 payment PDA, or a mock id).");
 const disputeId = z.string().describe("Dispute id, e.g. d-1.");
@@ -121,8 +183,13 @@ export const toolSchemas = {
   },
 };
 
-export function createMcpServer(service: PaymentService): McpServer {
+/**
+ * `principal` is the trusted caller identity from the transport (HTTP bearer token / stdio env).
+ * Undefined = legacy open mode, allowed only for the local mock demo (see http.ts / index.ts).
+ */
+export function createMcpServer(service: PaymentService, principal?: Principal): McpServer {
   const server = new McpServer({ name: "singit-mcp", version: "0.1.0" });
+  const guard = makeGuard(service, principal);
 
   server.registerTool(
     "create_mandate",
@@ -134,8 +201,9 @@ export function createMcpServer(service: PaymentService): McpServer {
     },
     (args) =>
       run(async () => {
+        guard.mandateIssuance();
         const mandate = await service.createMandate({
-          actor: args.actor,
+          actor: args.actor ?? args.payer,
           payer: args.payer,
           totalBudget: parseUsdc(args.totalBudget),
           perTxCap: parseUsdc(args.perTxCap),
@@ -153,7 +221,7 @@ export function createMcpServer(service: PaymentService): McpServer {
       description: "Look up a mandate by id: its terms, remaining budget, and its holds.",
       inputSchema: toolSchemas.get_mandate,
     },
-    (args) => run(async () => service.getMandate(args.mandateId)),
+    (args) => run(async () => guard.mandateView(service.getMandate(args.mandateId))),
   );
 
   server.registerTool(
@@ -162,7 +230,7 @@ export function createMcpServer(service: PaymentService): McpServer {
       description: "List every mandate with its remaining budget and holds.",
       inputSchema: toolSchemas.list_mandates,
     },
-    () => run(async () => ({ mandates: service.listMandates() })),
+    () => run(async () => ({ mandates: guard.filterMandates(service.listMandates()) })),
   );
 
   server.registerTool(
@@ -176,7 +244,7 @@ export function createMcpServer(service: PaymentService): McpServer {
     (args) =>
       run(async () => {
         const hold = await service.hold({
-          actor: args.actor,
+          actor: guard.actorFor("hold", args.actor, { mandateId: args.mandateId }),
           mandateId: args.mandateId,
           payee: args.payee,
           amount: parseUsdc(args.amount),
@@ -198,7 +266,7 @@ export function createMcpServer(service: PaymentService): McpServer {
     (args) =>
       run(async () => {
         const hold = await service.capture({
-          actor: args.actor,
+          actor: guard.actorFor("capture", args.actor, { holdId: args.holdId }),
           holdId: args.holdId,
           amount: parseUsdc(args.amount),
           releaseRemainder: args.releaseRemainder,
@@ -215,7 +283,7 @@ export function createMcpServer(service: PaymentService): McpServer {
     },
     (args) =>
       run(async () => {
-        const hold = await service.release({ actor: args.actor, holdId: args.holdId });
+        const hold = await service.release({ actor: guard.actorFor("release", args.actor, { holdId: args.holdId }), holdId: args.holdId });
         return { hold, txSig: hold.lastTxSig };
       }),
   );
@@ -231,7 +299,7 @@ export function createMcpServer(service: PaymentService): McpServer {
     (args) =>
       run(async () => {
         const hold = await service.refund({
-          actor: args.actor,
+          actor: guard.actorFor("refund", args.actor, { holdId: args.holdId }),
           holdId: args.holdId,
           amount: parseUsdc(args.amount),
         });
@@ -248,7 +316,7 @@ export function createMcpServer(service: PaymentService): McpServer {
     (args) =>
       run(async () => {
         const dispute = await service.openDispute({
-          actor: args.actor,
+          actor: guard.actorFor("open_dispute", args.actor, { holdId: args.holdId }),
           holdId: args.holdId,
           reason: args.reason,
           evidence: args.evidence,
@@ -263,7 +331,7 @@ export function createMcpServer(service: PaymentService): McpServer {
       description: "List disputes, optionally filtered by status and/or mandate.",
       inputSchema: toolSchemas.list_disputes,
     },
-    (args) => run(async () => ({ disputes: service.listDisputes({ status: args.status, mandateId: args.mandateId }) })),
+    (args) => run(async () => ({ disputes: guard.filterByMandate(service.listDisputes({ status: args.status, mandateId: args.mandateId })) })),
   );
 
   server.registerTool(
@@ -277,8 +345,9 @@ export function createMcpServer(service: PaymentService): McpServer {
     },
     (args) =>
       run(async () => {
+        guard.humanOnly("resolve_dispute");
         const dispute = await service.resolveDispute({
-          actor: args.actor,
+          actor: args.actor ?? "human",
           disputeId: args.disputeId,
           outcome: args.outcome,
           refundAmount: args.refundAmount !== undefined ? parseUsdc(args.refundAmount) : undefined,
@@ -295,7 +364,7 @@ export function createMcpServer(service: PaymentService): McpServer {
       description: "List audit log entries (every create_mandate/hold/capture/release/refund/dispute call and its outcome).",
       inputSchema: toolSchemas.list_audit_log,
     },
-    (args) => run(async () => ({ entries: service.listAuditLog({ mandateId: args.mandateId, limit: args.limit }) })),
+    (args) => run(async () => ({ entries: guard.filterByMandate(service.listAuditLog({ mandateId: args.mandateId, limit: args.limit })) })),
   );
 
   return server;

@@ -32,6 +32,7 @@ export const RefusalCodes = [
   "OPERATION_UNKNOWN", // a money-moving backend call was ambiguous (lost response/timeout); pending reconcile
   "OPERATION_PENDING", // another op on this hold is still pending/unknown; refused before any backend call
   "IDEMPOTENCY_KEY_REUSED", // same scoped idempotency key, different request params
+  "PRINCIPAL_FORBIDDEN", // MVP-01: the trusted transport principal may not perform this action / see this object
 ] as const;
 export type RefusalCode = (typeof RefusalCodes)[number];
 

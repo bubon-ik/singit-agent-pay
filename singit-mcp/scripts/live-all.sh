@@ -29,7 +29,7 @@ cleanup() {
   wait 2>/dev/null || true
 }
 trap cleanup INT TERM EXIT
-(cd "$ROOT" && PORT="$MCP_PORT" exec node --import tsx src/index.ts --http) &
+(cd "$ROOT" && PORT="$MCP_PORT" SINGIT_MCP_TRUSTED_OPERATOR="${SINGIT_MCP_TRUSTED_OPERATOR:-1}" exec node --import tsx src/index.ts --http) &
 MCP_PID="$!"
 PIDS="$MCP_PID"
 deadline=$((SECONDS + 45))

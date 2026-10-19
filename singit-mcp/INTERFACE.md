@@ -190,6 +190,17 @@ Amounts are base-unit decimal strings (`"2500000"` = 2.5 USDC). Times are intege
 - **txSig / txRef:** `txSig` is a mock ref (`mock-tx-N`) for MockBackend and a finalized devnet signature for Capture402Backend that links to the Solana explorer (`https://explorer.solana.com/tx/<sig>?cluster=devnet`). It appears in the tool result, in `hold.txSigs`/`lastTxSig`, in `dispute.txSigs`, and in the audit `txSig`.
 - **Approval token:** `issueApprovalToken(secret, {disputeId, outcome, refundAmount})` in `src/approval.ts`. It is HMAC-SHA256 over `singit-dispute-v1|disputeId|outcome|amount`, and the amount is forced to 0 for `reject`. CLI: `SINGIT_HUMAN_APPROVAL_SECRET=… npm run approve -- d-1 refund 2500000`.
 
+## Trust boundary and principals (MVP-01, #9)
+
+Local-only MVP: the server binds `127.0.0.1`; one buyer, one merchant, one human operator. This is not an untrusted public API.
+
+- **Principal comes from the transport, never from tool input.** HTTP: `Authorization: Bearer <token>`, where `SINGIT_BUYER_TOKEN` maps to the buyer (`SINGIT_PAYER_ADDRESS`) and `SINGIT_MERCHANT_TOKEN` to the merchant (`SINGIT_MERCHANT_ADDRESS`). Tokens are at least 16 chars, all distinct from each other and from the human secrets, compared in constant time. stdio: the process boundary is the trust boundary and `SINGIT_MCP_PRINCIPAL=buyer|merchant` fixes the principal.
+- **When tokens are set**, `/mcp` rejects missing or unknown tokens (401 `AUTH_REQUIRED`), a Host outside the loopback allowlist or `SINGIT_MCP_ALLOWED_HOSTS` (403), and any `Origin` outside `SINGIT_MCP_ALLOWED_ORIGINS` (403), all before business logic. `X-Forwarded-*` is never trusted and `/mcp` sends no CORS headers.
+- **`actor` is informational.** With a principal it must equal the principal's id, or the call is refused with `PRINCIPAL_FORBIDDEN` before any backend call.
+- **Role matrix:** buyer can `hold`, `open_dispute` and `release`; merchant can `capture`, `refund` and `release`. The `create_mandate` and `resolve_dispute` tools are refused for every agent principal. Reads (`get_mandate`, `list_mandates`, `list_disputes`, `list_audit_log`) and mutations are limited to mandates where the principal is payer or an allowed counterparty.
+- **Mandate issuance is human-only:** `POST /human/mandate` (header `x-singit-human-secret` = `SINGIT_HUMAN_ROUTE_SECRET`) with `{payer,totalBudget,perTxCap,expiresAt,allowedCounterparties,note?}`. Dispute decisions stay on `/human/resolve` or `npm run approve`. No MCP tool returns a human secret or approval token.
+- **Legacy modes (explicit):** with no agent tokens, `/mcp` is open only on the mock backend (local demo). A non-mock backend refuses unauthenticated MCP unless `SINGIT_MCP_TRUSTED_OPERATOR=1`, which `live-all.sh` sets because the dashboard bridge still drives all roles through one client. Per-role dashboard tokens are a follow-up; until then, the operator process is the trust boundary in live mode.
+
 ## Transports
 - stdio (default): `npx tsx src/index.ts`
 - streamable HTTP: `--http` or `SINGIT_MCP_HTTP=1`. Binds `127.0.0.1`, **port 8787** (override with `PORT`), path `/mcp`, `GET /health`. Stateless, with one shared in-memory state per process.
