@@ -4,7 +4,7 @@ import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdi
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, parse } from "node:path";
 import { buildBackendFromEnv } from "./backend/factory.js";
-import { Capture402Backend } from "./backend/capture402.js";
+import { Capture402Backend, DEVNET_GENESIS_HASH } from "./backend/capture402.js";
 import type { PaymentBackend } from "./backend/types.js";
 import { PaymentService } from "./service.js";
 import { FileStateStore } from "./store.js";
@@ -130,6 +130,12 @@ export async function createServiceRuntime(
   };
   try {
     if (live) releaseNamespace = namespaceLock(env);
+    const reviewedNamespace = persistence?.store.load().reviewedNamespace;
+    if (reviewedNamespace && (reviewedNamespace.programId !== env.SINGIT_PROGRAM_ID ||
+        reviewedNamespace.payer !== env.SINGIT_PAYER_ADDRESS || reviewedNamespace.merchant !== env.SINGIT_MERCHANT_ADDRESS ||
+        reviewedNamespace.genesisHash !== DEVNET_GENESIS_HASH)) {
+      throw new StartupError("JOURNAL_NAMESPACE_MISMATCH", "The reviewed original journal belongs to another economic namespace; preserve it and review the configuration");
+    }
     const backend = options.backend ?? buildBackendFromEnv(env);
     const service = new PaymentService({
       backend,

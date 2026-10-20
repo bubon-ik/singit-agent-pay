@@ -9,7 +9,7 @@ import { chmodSync, closeSync, constants, fchmodSync, fstatSync, fsyncSync, lsta
 import { join } from "node:path";
 import type { AuditEntry, RefusalCode } from "./audit.js";
 import type { PreparedTx } from "./backend/types.js";
-import { JournalError, parseJournal, validateRecord, type RecordLine } from "./journal.js";
+import { JournalError, parseJournal, validateRecord, type LegacyReview, type RecordLine } from "./journal.js";
 
 export interface StoredMandate {
   id: string;
@@ -117,6 +117,8 @@ export interface Snapshot {
   seqs: Seqs;
   /** Old non-atomic terminal records cannot safely be upgraded by guessing their effects. */
   legacyIssues?: string[];
+  /** Immutable economic namespace of an explicitly reviewed legacy prefix. */
+  reviewedNamespace?: LegacyReview["namespace"];
 }
 
 /** Atomic commit of a terminal op outcome plus the hold/mandate snapshot(s) it produced, written
@@ -300,7 +302,7 @@ export class FileStateStore implements StateStore {
     } finally { if (fd !== undefined) closeSync(fd); }
   }
 
-  load(): Snapshot {
+  private readRaw(): string {
     let fd: number | undefined;
     try {
       fd = openSync(this.filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -311,10 +313,23 @@ export class FileStateStore implements StateStore {
       let raw: string;
       try { raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
       catch { throw new JournalError("JOURNAL_CORRUPT", 0); }
-      return parseJournal(raw);
+      return raw;
     }
     catch (error) { this.failed = true; throw error; }
     finally { if (fd !== undefined) closeSync(fd); }
+  }
+  load(): Snapshot {
+    try { return parseJournal(this.readRaw()); }
+    catch (error) { this.failed = true; throw error; }
+  }
+  /** Explicit offline operator operation only. Validate the entire resulting history
+   * before its single append; no accounting override, backend or automatic repair. */
+  appendLegacyReview(data: LegacyReview): Snapshot {
+    const raw = this.readRaw(), record: RecordLine = { t: "legacyreview", v: 2, data };
+    validateRecord(record, 0);
+    parseJournal(`${raw}${JSON.stringify(record)}\n`);
+    this.appendLine(record);
+    return this.load();
   }
   putMandate(data: StoredMandate): void { this.appendLine({ t: "mandate", v: 2, data }); }
   putHold(data: StoredHold): void { this.appendLine({ t: "hold", v: 2, data }); }
