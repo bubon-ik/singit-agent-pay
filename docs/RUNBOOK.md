@@ -136,8 +136,9 @@ Keys, RPC URLs with credentials, signed wires, journals, live receipts and walle
 
 ## 10. Event checklist (20 October 2026, 13:30 Europe/Prague)
 
-- [ ] Re-confirm the track, timing and submission rules on https://thefintechers.com/hackathon.
+- [x] Re-confirm the track, timing and submission rules on https://thefintechers.com/hackathon (checked 20 October, 08:50).
 - [ ] Freeze the SHA; re-run the offline gate on it; update RELEASE-GATE.md.
 - [ ] Give the jury repository access and setup instructions (README → `npm run demo:all` for the mock demo).
 - [ ] Declare honestly what existed before the event and what was built during it.
-- [ ] Demo plan: 4 minutes plus 3 minutes Q&A. Without a live GO, run the mock demo labeled MOCK; historical devnet results are labeled HISTORICAL. A video is not proof of a live run.
+- [ ] Submit the repository link before the 13:30 code freeze. No video or one-pager is required.
+- [ ] Pitch: 3 minutes of pitch and demo plus 2 minutes of jury Q&A, on-site presenters only. Open with one line on what existed before, then show what was built. Run the dashboard on mock labeled MOCK and present the accepted devnet run as recorded; another live run needs its own authorization.

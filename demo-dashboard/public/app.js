@@ -138,7 +138,7 @@ async function refresh() {
   const startBlocker = storyStartBlocker(s);
   // Header badge shows chain state; its tooltip identifies the selected backend mode.
   const b = $("backend"); b.textContent = `backend: ${s.chain}`; b.className = `pill ${s.chain}`;
-  $("subtitle").textContent = s.chain === "unavailable" ? s.storyBlocker : `Programmable mandates · ${s.chain === "mock" ? "USDC escrow (mock; capture402 on devnet next)" : "USDC escrow on Solana devnet (capture402)"} · human-approved disputes`;
+  $("subtitle").textContent = s.chain === "unavailable" ? s.storyBlocker : `Programmable mandates · ${s.chain === "mock" ? "USDC escrow (mock; live runs use capture402 on Solana devnet)" : "USDC escrow on Solana devnet (capture402)"} · human-approved disputes`;
   const mode = s.backend === "mcp-http" ? "mcp-http" : s.backend === "local" ? "local" : "in-process";
   b.title = `${mode} — ${s.backendNote}${s.chain === "mock" ? " — tx refs are mock receipts" : s.chain === "devnet" ? " — real Solana devnet signatures" : ""}`;
   $("cluster").textContent = "explorer: solana devnet";
