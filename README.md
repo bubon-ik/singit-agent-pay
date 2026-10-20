@@ -94,6 +94,32 @@ Open http://127.0.0.1:5173 and press **▶ Run demo story**. In 13 steps a resea
 
 On first run `demo:all` writes random local secrets to `singit-mcp/.env.local` (gitignored).
 
+## Amazon Bedrock buyer
+
+The optional [Bedrock buyer](examples/bedrock-buyer/README.md) runs a real model
+through four bounded MCP steps: quote, hold, purchase and retrieval. Its merchant
+and mock launcher use this repository's payment service; no Capture402 source
+checkout is needed. AWS dependencies have their own pinned lockfile.
+
+After the normal root `npm ci`, using Node.js 22 or later:
+
+```sh
+npm run bedrock:install
+npm run test:bedrock
+```
+
+Tests inject model responses and use disposable local mock payments; no AWS
+credentials, RPC or wallets are needed. For an explicitly authorized real model
+run, prepare private settings and a new run directory following the
+[Bedrock runbook](examples/bedrock-buyer/BEDROCK.md), then run:
+
+```sh
+npm run bedrock:mock -- "$NEW_PRIVATE_RUN_DIR" "$PRIVATE_BEDROCK_SETTINGS"
+```
+
+The payment backend stays mock in this command; Bedrock inference can incur AWS
+charges. This port does not inherit the earlier Codex devnet acceptance.
+
 ## Connect an agent
 
 Start the server (`npm run demo:all`, or `npm run start:http` for the server only) and point an MCP client at `http://127.0.0.1:8787/mcp`.

@@ -9,8 +9,13 @@ Mainnet, customer funds, cross-host custody and HA are outside this MVP.
 
 `singit-agent-pay` owns principals, mandates, idempotency, journal, recovery and
 economic admission. `starPaw/capture402-solana` owns the program, ABI, operator
-tools and the isolated merchant/buyer example. The existing SingItAI product is
-an external reference, not a dependency of this workflow. Its current x402/CDP
+tools and the original isolated merchant/buyer example. This repository also
+provides the standalone [Bedrock buyer](../examples/bedrock-buyer/README.md),
+adapted from Capture402 PR #10, with its merchant, adapters and local mock tests.
+It uses this checkout's payment service and does not require a Capture402 source
+checkout. Its validation is separate from the accepted Codex source pair.
+The existing SingItAI product is an external reference, not a dependency of this
+workflow. Its current x402/CDP
 payment path is not evidence that it uses the Capture402 MCP integration.
 
 Reuse trusted principals and MCP idempotency already merged through PRs #17–19.
