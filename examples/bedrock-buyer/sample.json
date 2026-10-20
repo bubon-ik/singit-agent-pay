@@ -1,0 +1,5 @@
+[
+  { "id": "invoice-1", "category": "compute", "amount": "1200" },
+  { "id": "invoice-2", "category": "data", "amount": "800" },
+  { "id": "invoice-2", "category": "data", "amount": "800" }
+]
