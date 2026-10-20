@@ -57,8 +57,54 @@ Keep a private byte-for-byte backup before any separately authorized installed
 upgrade. Do not run an old reader on a v2 journal: historical binaries did not
 enforce version rejection and cannot enforce the new atomic boundaries. Code
 rollback cannot undo chain state. Ambiguous legacy reconciliation/migration needs
-an explicit reviewed disposition preserving the original; no automatic conversion
-or financial repair command is provided.
+an explicit reviewed disposition preserving the original. There is no automatic
+conversion or financial repair command.
+
+### Explicit disposition of a fully reviewed v1 history
+
+`review:legacy` is a separate offline operator tool. It supports only a complete
+v1 history of standalone records whose operations are all terminal. It rejects
+pending/UNKNOWN, partial/corrupt files, mixed-format histories, open disputes,
+missing originals, inconsistent receipts/accounting and already reviewed files.
+It imports no runtime, RPC client, signer or key loader. It verifies the retained
+signed wires and their actual program, signer, canonical ATAs and immutable terms;
+it cannot establish chain finality without independently reviewed external evidence.
+
+A private mode-600 review JSON names distinct operator/reviewer identities and
+binds the exact original UTF-8 prefix SHA256/byte count, parsed snapshot digest,
+program/genesis/payer/merchant namespace and private evidence digest. Its per-op
+`finalized_success` dispositions include the original signature, finalized/err=null
+attestation, evidence digest and historical receipt snapshot already present at
+that terminal record in the original file. Those receipts must reproduce the
+whole retained hold history. A `retained_failure` preserves the original failed
+hold and its committed reservation; it proves neither no-send nor permission to
+repeat or free that budget. Review is not an account snapshot or an H=0 inference.
+
+Construct and independently review this packet privately; never derive an
+approval from the tool's exit status. A separately authorized live preflight must
+check the particular originals and namespace before any installed application.
+Explicitly stop/exclude an older runtime that predates custody locks. Retain a
+byte-for-byte backup and the old process/configuration identity. Then:
+
+```sh
+npm run review:legacy -- --check --state-dir /private/state --review /private/review.json
+# Only after the separate installed disposition authorization and exclusive custody:
+npm run review:legacy -- --apply --state-dir /private/state --review /private/review.json
+```
+
+Check mode changes no bytes or locks. Apply mode acquires the same state and
+host-wide namespace locks as the runtime (`SINGIT_NAMESPACE_LOCK_DIR`, or the
+normal home-directory default), validates again and appends one fsynced v2
+`legacyreview` record to the original file. It accepts no accounting override,
+never edits/truncates the prefix and never sends or signs. A partial append remains
+blocked for inspection, without automatic truncation or another apply attempt.
+The reader supplies immutable original receipt projections from the reviewed
+history; all final holds, mandates, disputes, keys and failed reservations remain
+unchanged. Later startup must match the retained review's program/genesis/payer/
+merchant namespace before backend construction or audit backfill. Later startup audit backfills are labeled recovered history, not new
+execution or fresh chain proof. Old v1 additions, another review record or changed
+terminal originals after this boundary refuse load. Never start an older reader
+on the resulting file. The review tool is not exposed through MCP or HTTP.
 
 ## Inspection when startup refuses
 

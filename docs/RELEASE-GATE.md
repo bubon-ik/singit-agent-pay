@@ -2,26 +2,48 @@
 
 Status as of 20 October 2026. This file records offline evidence only. A skipped or unrun test is not a PASS, and offline tests are not live economic acceptance.
 
-The tables below retain their original pinned historical SHA and results. The
-scenario and current acceptance sequence are [MVP-SCENARIO.md](MVP-SCENARIO.md);
-new journal/runtime changes require fresh evidence on their final exact revision.
-Journal v2 replaces the historical tail-repair policy with byte-preserving refusal;
-see [JOURNAL.md](JOURNAL.md). This edit does not grant offline readiness, authorize
-a run, accept the newer source, or close the remaining refund/reclaim/LLM gates.
+The current offline candidate is recorded below; the older tables retain their
+original historical SHA and results. The ordered acceptance sequence is
+[MVP-SCENARIO.md](MVP-SCENARIO.md). Journal v2 preserves refused bytes and supports
+only an explicitly reviewed, separately authorized legacy disposition; see
+[JOURNAL.md](JOURNAL.md). Source acceptance never authorizes installed changes or
+payments and does not close the real-agent devnet E2E gate.
 
 ## Current preparation and ordered decisions
 
-Journal/runtime PR #23 is a candidate at
-`643dac3070b97677e24ce7c457ced924f82839e2`, based on
-`97449d25032bbe6dc86d5f8b183b2ce3ec6262d4`. The local recovery/refund/reclaim
-preparation is specified in [RECOVERY-OFFLINE.md](RECOVERY-OFFLINE.md). Its
-scenarios retain PR #23's v1/v2 byte preservation, atomic receipt/accounting/audit
-and custody-drain boundaries. Automatic live cleanup and multi-step disputes
-remain disabled. The merchant still defaults to mock.
+Application source `2bca0bb28477659420b690b7ffccf589c6f4696c` includes the merged
+journal/runtime, recovery scenarios and verified merchant-profile changes plus
+the explicit offline legacy-disposition tool. The companion Capture402 source is
+`208de48733d6a687c77359d4e7c0b0a615666374` (merchant, real CLI buyer and recovery
+scenarios); its ABI pin remains `236b09a44240d285ee6f33d2e8dac79f81058e3d`.
+Documentation/command-alias followups do not replace the private final merge-SHA,
+tree and lockfile record. The merchant still defaults to mock. Automatic live
+cleanup and multi-step disputes remain disabled.
+
+Fresh offline checks on this application pair:
+
+| Check | Result and environment |
+| --- | --- |
+| SingIt typecheck/build | PASS; Node 24.20.0, npm 11.19.0, macOS arm64 |
+| MCP/backend/transport | 367 PASS, 14 live opt-in SKIPPED, 29 files; includes 20 legacy-disposition cases |
+| Dashboard | 4 E2E and 11 unit PASS |
+| Companion merchant | 43 PASS against this SingIt application source, authenticated HTTP and stdio |
+| Capture402 local | 60 Rust and 1,860 integration PASS; 95 platform/opt-in SKIPPED; typecheck, wallet build and clippy PASS |
+| Operator checks | 312 tests successful locally with 29 platform skips; all 312 successful in the Linux root/boot gate |
+| Linux exact-source gate | [Components run 39344787816](https://github.com/starPaw/capture402-solana/actions/runs/39344787816), Capture402 SHA above: PASS; 1,954 integration PASS/1 root-only SKIPPED, separate root custody suite 31 PASS |
+| SBF | Fresh empty-target macOS build matches the retained source artifact; Linux built/tested its own artifact. Both digests and toolchains are retained separately; cross-host binary reproducibility is not claimed |
+| Real model mock | Four actual Codex CLI MCP calls, useful purchased report and exact artifact digest; budget/role refusals add zero operations. Trace/usage and credentials remain private |
+| Independent source review | Agent review of the exact application revisions; original receipts, wire/action/amount/guard binding, namespace enforcement and byte preservation checked. This is not independent human security expertise |
+
+All five dependency lockfiles retain their recorded digests. Rust is 1.90.0;
+cargo-build-sbf is 2.2.14 with platform-tools v1.53 and architecture v0. Complete
+commands, original test logs, the final source/tree identity, reviews, lockfiles,
+source/deployed byte linkage and model trace belong in the private acceptance
+packet. The recovery/refund scope and limitations are [RECOVERY-OFFLINE.md](RECOVERY-OFFLINE.md).
 
 | Decision | Evidence required | Current disposition |
 | --- | --- | --- |
-| `OFFLINE_READY` | Exact final combined source review, lockfiles/toolchain, backend/transport/dashboard/merchant/fault checks, accepted refund/reclaim scope, useful real-LLM mock trace and reviewed devnet profile | Not granted by scenario preparation. Final combined revision and remaining integration/LLM evidence are pending |
+| `OFFLINE_READY` | Exact final combined source review, lockfiles/toolchain, backend/transport/dashboard/merchant/fault checks, accepted refund/reclaim scope, useful real-LLM mock trace and reviewed devnet profile | Application checks/review complete as above. Final merged tree and documentation followup must match the private freeze record before promotion |
 | `ONE_RUN_AUTHORIZED` | `OFFLINE_READY`, private existing-deployment/RPC/wallet/journal binding, named operator/reviewer/stop-go owner, deadlines and USDC/SOL/attempt caps, separate owner authorization explicitly covering read-only preflight and one run | NOT AUTHORIZED. This decision permits only the named experiment; it does not claim the experiment succeeded |
 | `MVP_ACCEPTED` | The authorized real-LLM → merchant → MCP → devnet E2E, both original finalized outcomes with err=null, token/accounting effects, durable artifact digest, no pending/UNKNOWN, explicit operator and reviewer acceptance | NOT ACCEPTED; follows E2E |
 
