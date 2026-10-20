@@ -10,13 +10,13 @@ Built at FinTechers Prague, Track 2 "Agents that pay each other", 19–20 Octobe
 
 | What | State |
 |---|---|
-| Demo on the mock backend (default) | Runs without live wallets or RPC. Label MOCK; candidate evidence and remaining gates are in the [release gate](docs/RELEASE-GATE.md) |
-| Capture402 devnet backend | Implemented against the pinned public ABI and tested offline. Earlier scripted devnet runs on older revisions finalized 4/4 direct operations and 13/13 dashboard → MCP → devnet steps (historical, see [#14](https://github.com/bubon-ik/singit-agent-pay/issues/14)) |
-| Real LLM agent paying on devnet (MVP-07) | Not run yet |
-| One limited devnet run | **NOT AUTHORIZED** until final offline readiness and separate operational approval ([release gate](docs/RELEASE-GATE.md)) |
-| Real-agent devnet MVP acceptance | **PENDING E2E** and explicit operator/reviewer acceptance; permission for one test is an earlier, separate gate |
+| Real LLM agent paying on devnet (MVP-07) | **Accepted** on 20 October 2026 as an experimental devnet run. A real Codex CLI buyer went through quote → hold → purchase → retrieval with a separate merchant over authenticated MCP. One authorize locked 1 test USDC; one capture took 0.65 and released 0.35 in the same instruction. Both original transactions finalized with `err=null`, and nothing was left pending or UNKNOWN. The buyer got a useful report whose digest matched. Source pair: this repo `951ca06`, capture402 `208de48`. Signatures and the model trace are kept private ([release gate](docs/RELEASE-GATE.md), [#14](https://github.com/bubon-ik/singit-agent-pay/issues/14)) |
+| Demo on the mock backend (default) | Runs without live wallets or RPC, labeled MOCK. Same server and safety rules, synthetic ledger |
+| Earlier devnet runs | Scripted runs on older revisions: 4/4 direct operations and 13/13 dashboard → MCP → devnet steps finalized (historical) |
+| Another live run | Needs its own owner authorization; the accepted run's authorization was single-use ([runbook](docs/RUNBOOK.md)) |
+| Still open | Event delivery ([#15](https://github.com/bubon-ik/singit-agent-pay/issues/15)) and a wider pilot ([#16](https://github.com/bubon-ik/singit-agent-pay/issues/16)) |
 
-Solana devnet and devnet USDC only, never mainnet. Experimental and not audited.
+Solana devnet and devnet USDC only, never mainnet. Experimental: no production claim and no human security audit.
 
 ## Why
 
@@ -131,11 +131,15 @@ Amounts are USDC base units as decimal strings (`2500000` = 2.5 USDC); times are
 npm run live:all -- /absolute/path/to/private/devnet.env
 ```
 
-This needs throwaway devnet wallets with devnet USDC and SOL, an approved HTTPS RPC, the confirmed program values, a private state directory, both human secrets and both agent tokens. The template is `singit-mcp/.env.example`. Live mode never falls back to mock. A live run also needs a GO in the release gate and the owner's separate authorization.
+This needs throwaway devnet wallets with devnet USDC and SOL, an approved HTTPS RPC, the confirmed program values, a private state directory, both human secrets and both agent tokens. The template is `singit-mcp/.env.example`. Live mode never falls back to mock. Every live run needs offline readiness and the owner's separate, single-use authorization ([release gate](docs/RELEASE-GATE.md)).
 
 - [docs/LIVE-DEMO.md](docs/LIVE-DEMO.md): wallet roles, startup recovery, private state
 - [docs/RUNBOOK.md](docs/RUNBOOK.md): caps, start and stop, what to do on UNKNOWN, buyer recovery
 - [docs/CAPTURE402-DEVNET.md](docs/CAPTURE402-DEVNET.md): ABI pin, deployment identity, funding estimates
+- [docs/MVP-SCENARIO.md](docs/MVP-SCENARIO.md): the accepted single-merchant purchase, step by step
+- [docs/JOURNAL.md](docs/JOURNAL.md) and [docs/RECOVERY-OFFLINE.md](docs/RECOVERY-OFFLINE.md): journal v2, blocked-state inspection, refund and payer reclaim scenarios
+
+The merchant and the real-LLM buyer used in the accepted run are in [starPaw/capture402-solana](https://github.com/starPaw/capture402-solana/tree/main/examples/singit-merchant) under `examples/singit-merchant`.
 
 ## Tests
 
@@ -152,7 +156,7 @@ The suites cover the mandate rules, the MCP transport with real clients, trusted
 |---|---|
 | `singit-mcp/` | MCP server: `PaymentService` (mandates, journal, reconciliation), transports, principals, human approval, mock and Capture402 backends, tests |
 | `demo-dashboard/` | Web dashboard that plays the story against the MCP server; human console for disputes |
-| `docs/` | [Architecture](docs/ARCHITECTURE.md), [interface](docs/INTERFACE.md), [demo story](docs/DEMO.md), [live demo](docs/LIVE-DEMO.md), [devnet backend](docs/CAPTURE402-DEVNET.md), [release gate](docs/RELEASE-GATE.md), [runbook](docs/RUNBOOK.md) |
+| `docs/` | [Architecture](docs/ARCHITECTURE.md), [interface](docs/INTERFACE.md), [demo story](docs/DEMO.md), [live demo](docs/LIVE-DEMO.md), [devnet backend](docs/CAPTURE402-DEVNET.md), [MVP scenario](docs/MVP-SCENARIO.md), [journal](docs/JOURNAL.md), [offline recovery](docs/RECOVERY-OFFLINE.md), [release gate](docs/RELEASE-GATE.md), [runbook](docs/RUNBOOK.md) |
 
 Contributing rules (secrets, live authorization, no retries after UNKNOWN): [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -163,8 +167,9 @@ Everything in this repository was written during the event. The first commit is 
 - MCP server over stdio and streamable HTTP, 12 tools
 - Mandate engine and escrow lifecycle over a pluggable `PaymentBackend` (mock and capture402 devnet)
 - Trusted principals per agent, human-only mandates and dispute decisions
-- Durable operation journal, idempotent replay, UNKNOWN handling, fail-closed admission and readiness
-- Audit log, demo dashboard, backend conformance suite, release gate and runbook
+- Durable operation journal (v2, with offline inspection and reviewed legacy disposition), idempotent replay, UNKNOWN handling, fail-closed admission and readiness
+- Audit log, demo dashboard, backend conformance suite, offline recovery scenarios, release gate and runbook
+- The accepted real-agent devnet run, with the merchant and LLM buyer in the capture402 repository (`examples/singit-merchant`, also written during the event)
 
 ## Pre-existing (reused, not judged)
 
