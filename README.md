@@ -2,7 +2,7 @@
 
 **Agents that pay each other, under human-set limits.** SingIt Agent Pay is an MCP server that lets AI agents pay each other in USDC through escrow. A human sets the mandate (budget, per-transaction cap, allowed payees, expiry). The buyer agent locks funds; the seller agent captures what the work actually cost; the rest goes back. Only a human can settle a dispute, and every action, including every refused one, lands in an audit log.
 
-Built at FinTechers Prague, Track 2 "Agents that pay each other", 19–20 October 2026. Escrow runs on [capture402](https://github.com/starPaw/capture402-solana) on Solana devnet, with a mock backend for local demos.
+Built at The FinTechers Hackathon, Prague, 19–20 October 2026: Track 2 "Stablecoins and new financial infrastructure", challenge "Agents that pay each other". Escrow runs on [capture402](https://github.com/starPaw/capture402-solana) on Solana devnet, with a mock backend for local demos.
 
 ![Demo dashboard: mandate, escrow holds, a dispute waiting for a human, and the live event stream with blocked attempts](demo-dashboard/screenshots/03-dispute-pending.png)
 
@@ -64,6 +64,14 @@ Payments fail in messy ways: lost responses, timeouts, crashes between "sent" an
 - **One runtime per set of wallets.** A second server with the same program, payer and merchant refuses to start, even with another state directory.
 
 Details: [docs/INTERFACE.md](docs/INTERFACE.md) ("Live safety policy", "Operation journal").
+
+## Responsible AI and compliance
+
+- **The model never holds money or sets limits.** LLM agents only call tools. Keys stay in the server process; budgets, caps, payees and deadlines are enforced by deterministic code before any transaction is built, and the escrow program enforces the hold maximum and deadlines on-chain.
+- **Human authority stays human.** Only a human issues mandates and decides disputes, through a separate route and an HMAC token bound to the exact decision. A prompt is never an authorization boundary: each agent's role comes from its own token.
+- **Explainable by construction.** Every call and every refusal is audited with the actor, a stable code and a reason. Each payment can be traced by its `operationId`.
+- **Data handling.** Demo data is synthetic and money is devnet test USDC; no personal data is processed. Signed transactions, journals and model traces stay private; public state and `get_operation` redact them.
+- **Honest scope.** Experimental devnet software, not audited. Moving real funds would need regulatory review (for example MiCA for e-money tokens such as USDC in the EU) and an independent security audit.
 
 ## Quickstart (mock, no keys)
 
@@ -175,6 +183,10 @@ Everything in this repository was written during the event. The first commit is 
 
 - **SingIt:** [singitai.app](https://singitai.app), [github.com/bubon-ik/SingItAI](https://github.com/bubon-ik/SingItAI). The team's existing product and x402 API; not part of this repository.
 - **capture402 escrow:** [starPaw/capture402-solana](https://github.com/starPaw/capture402-solana), the Solana auth/capture escrow program the devnet backend targets. First published 19 October 2026, 10:46 CEST, before the 12:00 kickoff. Not part of this repository.
+
+## AI assistance
+
+Disclosed as the hackathon rules ask: the team built this with AI coding assistants. Claude Code (Anthropic) and OpenAI Codex wrote and reviewed much of the code, tests and docs under the team's direction. In the accepted devnet run the buyer agent itself was the Codex CLI. Merges, the live run and funding were authorized by the team.
 
 ## License
 
