@@ -102,7 +102,7 @@ The lock files hold the PID of their owner: `.singit-mcp.lock` in `SINGIT_STATE_
 
 - Expiry alone returns nothing.
 - What is still held can be returned only by the payer's on-chain `reclaim`, at or after `captureDeadline`, signed by the payer key with SOL for the fee.
-- `reclaim` is not an MCP tool. Capture402 already provides `integration/src/reclaim.ts` and an unsigned-offer route. Their local scenario coverage is in [RECOVERY-OFFLINE.md](RECOVERY-OFFLINE.md); acceptance bound to the selected deployment and installed environment remains pending.
+- `reclaim` is not an MCP tool. Capture402 already provides `integration/src/reclaim.ts` and an unsigned-offer route. Their local scenario coverage is in [RECOVERY-OFFLINE.md](RECOVERY-OFFLINE.md). The accepted bounded MVP packet privately records the selected deployment binding and operator-route review. The normal purchase did not execute a live reclaim or refund; either requires separate authorization and its own original evidence.
 - Already captured funds are not affected. A refund of captured funds is merchant-funded and never guaranteed.
 - Bind the existing deployment record, source/artifact, network/genesis, program/loader/ProgramData/slot/upgrade authority, mint/token program, original payment PDA/payer/merchant/terms, approved RPC, payer fee readiness and retained journal/namespace before accepting a route. Use the Capture402 companion checklist; a network label or matching program address is insufficient.
 - Stop the payment runtime and establish exclusive custody before a separately authorized operator recovery. Do not run an external payer CLI concurrently with the runtime or discard its locks/history to obtain custody.

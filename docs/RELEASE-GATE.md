@@ -1,24 +1,26 @@
 # MVP release gate and Go/No-Go (MVP-08, #15)
 
-Status as of 20 October 2026. This file records offline evidence only. A skipped or unrun test is not a PASS, and offline tests are not live economic acceptance.
+Status as of 20 October 2026. This file records the bounded experimental devnet
+result and its offline gate. A skipped or unrun test is not a PASS, and offline
+tests alone are not live economic acceptance.
 
-The current offline candidate is recorded below; the older tables retain their
+The accepted source pair is recorded below; the older tables retain their
 original historical SHA and results. The ordered acceptance sequence is
 [MVP-SCENARIO.md](MVP-SCENARIO.md). Journal v2 preserves refused bytes and supports
 only an explicitly reviewed, separately authorized legacy disposition; see
 [JOURNAL.md](JOURNAL.md). Source acceptance never authorizes installed changes or
-payments and does not close the real-agent devnet E2E gate.
+payments. The separately authorized E2E result is recorded below.
 
 ## Current preparation and ordered decisions
 
-Application source `2bca0bb28477659420b690b7ffccf589c6f4696c` includes the merged
+Frozen application source `951ca0636680f1f11a9cb5a405ac86b5cf355625` includes the merged
 journal/runtime, recovery scenarios and verified merchant-profile changes plus
 the explicit offline legacy-disposition tool. The companion Capture402 source is
 `208de48733d6a687c77359d4e7c0b0a615666374` (merchant, real CLI buyer and recovery
 scenarios); its ABI pin remains `236b09a44240d285ee6f33d2e8dac79f81058e3d`.
-Documentation/command-alias followups do not replace the private final merge-SHA,
-tree and lockfile record. The merchant still defaults to mock. Automatic live
-cleanup and multi-step disputes remain disabled.
+The exact source/tree and lockfile record is retained privately. This summary is
+a documentation followup to the tested application source. The merchant still
+defaults to mock. Automatic live cleanup and multi-step disputes remain disabled.
 
 Fresh offline checks on this application pair:
 
@@ -43,9 +45,28 @@ packet. The recovery/refund scope and limitations are [RECOVERY-OFFLINE.md](RECO
 
 | Decision | Evidence required | Current disposition |
 | --- | --- | --- |
-| `OFFLINE_READY` | Exact final combined source review, lockfiles/toolchain, backend/transport/dashboard/merchant/fault checks, accepted refund/reclaim scope, useful real-LLM mock trace and reviewed devnet profile | Application checks/review complete as above. Final merged tree and documentation followup must match the private freeze record before promotion |
-| `ONE_RUN_AUTHORIZED` | `OFFLINE_READY`, private existing-deployment/RPC/wallet/journal binding, named operator/reviewer/stop-go owner, deadlines and USDC/SOL/attempt caps, separate owner authorization explicitly covering read-only preflight and one run | NOT AUTHORIZED. This decision permits only the named experiment; it does not claim the experiment succeeded |
-| `MVP_ACCEPTED` | The authorized real-LLM → merchant → MCP → devnet E2E, both original finalized outcomes with err=null, token/accounting effects, durable artifact digest, no pending/UNKNOWN, explicit operator and reviewer acceptance | NOT ACCEPTED; follows E2E |
+| `OFFLINE_READY` | Exact final combined source review, lockfiles/toolchain, backend/transport/dashboard/merchant/fault checks, accepted refund/reclaim scope, useful real-LLM mock trace and reviewed devnet profile | Accepted for the frozen source pair above, with exact agent reviews and private freeze record |
+| `ONE_RUN_AUTHORIZED` | `OFFLINE_READY`, private existing-deployment/RPC/wallet/journal binding, named operator/reviewer/stop-go owner, deadlines and USDC/SOL/attempt caps, separate owner authorization explicitly covering read-only preflight and one run | Recorded separately; the one permitted experiment completed. This authorization is not reusable |
+| `MVP_ACCEPTED` | The authorized real-LLM → merchant → MCP → devnet E2E, both original finalized outcomes with err=null, token/accounting effects, durable artifact digest, no pending/UNKNOWN, explicit operator and reviewer acceptance | Accepted for the bounded experimental devnet workflow described below |
+
+### Accepted experimental devnet result
+
+The real Codex CLI buyer completed quote → hold → purchase → retrieval through
+the separate merchant and authenticated MCP. Exactly one authorize locked
+1 test USDC; one capture took 0.65 and atomically released 0.35. Both original
+transactions finalized with `err=null`. Held is 0, gross captured and committed
+are 0.65, released is 0.35, and refunded is 0. Token effects reconcile. Payer SOL
+usage was 0.003037760, including account rent; merchant SOL usage was 0.000005.
+
+Purchase and retrieval returned identical artifact bytes after durable completion.
+The artifact digest and useful model report were verified. No pending/UNKNOWN
+remains; the manual run runtime was stopped. Operator and independent agent
+reviewer acceptance, original outcomes and model traces are retained privately.
+This is experimental devnet acceptance, with no production or human security
+audit claim. Refund/reclaim behavior is accepted within the documented local
+scope; this purchase did not include a new live recovery/refund rehearsal.
+Event-delivery items in [#15](https://github.com/bubon-ik/singit-agent-pay/issues/15)
+remain open.
 
 The E2E result is required for final acceptance, not for permission to attempt the
 single test that produces it. Merge authorization, operational authorization and
