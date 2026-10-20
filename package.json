@@ -19,6 +19,7 @@
     "typecheck": "npm --prefix singit-mcp run typecheck",
     "start:http": "npm --prefix singit-mcp run start:http",
     "approve": "npm --prefix singit-mcp run approve --",
-    "inspect:state": "npm --prefix singit-mcp run inspect:state --"
+    "inspect:state": "npm --prefix singit-mcp run inspect:state --",
+    "review:legacy": "npm --prefix singit-mcp run review:legacy --"
   }
 }
