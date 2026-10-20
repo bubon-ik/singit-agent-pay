@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Demo dashboard for singit-mcp (FinTechers hackathon, Track 2). Zero runtime deps.",
+  "description": "Demo dashboard for singit-mcp (FinTechers hackathon). Zero runtime deps.",
   "scripts": {
     "start": "node ../singit-mcp/node_modules/tsx/dist/cli.mjs server.mjs",
     "start:local": "SINGIT_BACKEND=local node server.mjs",

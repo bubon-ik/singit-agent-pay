@@ -2,7 +2,7 @@
   "name": "singit-mcp",
   "version": "0.1.0",
   "private": true,
-  "description": "MCP server for agent-to-agent stablecoin payments with programmable mandates (FinTechers hackathon, Track 2)",
+  "description": "MCP server for agent-to-agent stablecoin payments with programmable mandates (FinTechers hackathon)",
   "type": "module",
   "license": "Apache-2.0",
   "engines": {

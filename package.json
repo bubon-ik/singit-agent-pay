@@ -2,7 +2,7 @@
   "name": "singit-agent-pay",
   "version": "0.1.0",
   "private": true,
-  "description": "Agents that pay each other: MCP server with programmable USDC mandates, escrow holds and human-approved disputes (FinTechers Prague hackathon, Track 2)",
+  "description": "Agents that pay each other: MCP server with programmable USDC mandates, escrow holds and human-approved disputes (FinTechers Prague hackathon)",
   "license": "Apache-2.0",
   "engines": {
     "node": "^20.0.0 || ^22.0.0 || >=24.0.0"

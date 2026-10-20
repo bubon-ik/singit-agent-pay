@@ -2,21 +2,30 @@
 
 **Agents that pay each other, under human-set limits.** SingIt Agent Pay is an MCP server that lets AI agents pay each other in USDC through escrow. A human sets the mandate (budget, per-transaction cap, allowed payees, expiry). The buyer agent locks funds; the seller agent captures what the work actually cost; the rest goes back. Only a human can settle a dispute, and every action, including every refused one, lands in an audit log.
 
-Built at FinTechers Prague, Track 2 "Agents that pay each other", 19–20 October 2026. Escrow runs on [capture402](https://github.com/starPaw/capture402-solana) on Solana devnet, with a mock backend for local demos.
+Built at [FinTechers Prague](https://thefintechers.com/hackathon), 19–20 October 2026. Escrow runs on [capture402](https://github.com/starPaw/capture402-solana) on Solana devnet, with a mock backend for local demos.
 
 ![Demo dashboard: mandate, escrow holds, a dispute waiting for a human, and the live event stream with blocked attempts](demo-dashboard/screenshots/03-dispute-pending.png)
 
 ## Status
 
+As of 20 October 2026. The accepted application source pair is SingIt
+[`951ca0636680f1f11a9cb5a405ac86b5cf355625`](https://github.com/bubon-ik/singit-agent-pay/commit/951ca0636680f1f11a9cb5a405ac86b5cf355625)
+and Capture402
+[`208de48733d6a687c77359d4e7c0b0a615666374`](https://github.com/starPaw/capture402-solana/commit/208de48733d6a687c77359d4e7c0b0a615666374).
+The [release gate](docs/RELEASE-GATE.md) records the reviewed results and limits.
+
 | What | State |
 |---|---|
-| Demo on the mock backend (default) | Runs without live wallets or RPC. Label MOCK; candidate evidence and remaining gates are in the [release gate](docs/RELEASE-GATE.md) |
-| Capture402 devnet backend | Implemented against the pinned public ABI and tested offline. Earlier scripted devnet runs on older revisions finalized 4/4 direct operations and 13/13 dashboard → MCP → devnet steps (historical, see [#14](https://github.com/bubon-ik/singit-agent-pay/issues/14)) |
-| Real LLM agent paying on devnet (MVP-07) | Not run yet |
-| One limited devnet run | **NOT AUTHORIZED** until final offline readiness and separate operational approval ([release gate](docs/RELEASE-GATE.md)) |
-| Real-agent devnet MVP acceptance | **PENDING E2E** and explicit operator/reviewer acceptance; permission for one test is an earlier, separate gate |
+| Demo on the mock backend (default) | Runs without live wallets or RPC; labeled MOCK. The dashboard story is separate from the accepted real-agent purchase |
+| Capture402 devnet backend | Implemented against the pinned public ABI; exercised by the accepted real-agent MCP workflow below. Earlier direct/backend and dashboard runs remain historical evidence ([#14](https://github.com/bubon-ik/singit-agent-pay/issues/14)) |
+| Real LLM agent paying on devnet (MVP-07) | **ACCEPTED:** the real Codex CLI buyer completed quote → hold → purchase → retrieval and obtained a useful report. One authorize of 1 test USDC and one capture of 0.65 with atomic release of 0.35 both finalized with `err=null`; no pending/UNKNOWN remained |
+| One limited devnet run | Completed under separate operational authorization. That one-run authorization is not reusable; any new live run requires separate authorization |
+| Real-agent devnet MVP acceptance | **MVP_ACCEPTED** for the frozen experimental source pair, with explicit operator and independent agent reviewer acceptance. Traces and operational evidence remain private |
+| Event delivery (MVP-08) | Still open in [#15](https://github.com/bubon-ik/singit-agent-pay/issues/15): jury access, submission and pitch. The [launch tracker](https://github.com/bubon-ik/singit-agent-pay/issues/8) stays open |
 
 Solana devnet and devnet USDC only, never mainnet. Experimental and not audited.
+The accepted purchase did not include a new live refund/reclaim rehearsal;
+recovery is accepted within its [documented local scope](docs/RECOVERY-OFFLINE.md).
 
 ## Why
 
@@ -61,7 +70,7 @@ Payments fail in messy ways: lost responses, timeouts, crashes between "sent" an
 - **UNKNOWN is never guessed.** If the outcome of a send is unproven, the reservation is kept, the server stops accepting new payments, and only the original transaction can settle it. No new salt, no resend, no automatic compensation.
 - **Durable journal first.** The reservation and its intent are journaled before anything is signed; a failed disk write means nothing is sent. On devnet, startup restores the journal and reconciles read-only before serving.
 - **Fail closed.** UNKNOWN, a failed journal write or shutdown closes economic writes. `GET /ready` reports why; `GET /health` only reports that the process is alive.
-- **One runtime per set of wallets.** A second server with the same program, payer and merchant refuses to start, even with another state directory.
+- **One runtime per set of wallets on one host.** A second server on that host with the same program, payer and merchant refuses to start, even with another state directory. The lock does not coordinate separate hosts.
 
 Details: [docs/INTERFACE.md](docs/INTERFACE.md) ("Live safety policy", "Operation journal").
 

@@ -81,7 +81,7 @@ Tool names and audit actions are the same. Use `hold` for escrow authorization. 
 
 Real Solana signatures are linked to the devnet explorer. Mock transaction references remain plain badges.
 
-## Operations (ops) — upcoming singit-mcp hardening
+## Operations (ops)
 
 The Operations card appears only when `/api/state` includes an `ops` array. Pending operations show an amber spinner; unknown outcomes show orange “OUTCOME UNKNOWN — funds reserved, reconciling”. Mandates show “reserved X USDC (pending)” for active reservations, which are already included in `committed`. Refusal codes `OPERATION_UNKNOWN` / `OPERATION_PENDING` and `OUTCOME_UNKNOWN` / reconcile audit rows use amber or orange styling instead of red. Run `npm run test:unit` for the offline unit tests.
 

@@ -1,6 +1,13 @@
 # singit-mcp
 
-SingIt MCP is an MCP server for agent-to-agent USDC payments on Solana devnet, with programmable mandates that constrain budgets, counterparties, and payment timing. Built at the FinTechers hackathon in Prague, Track 2 "Agents that pay each other".
+SingIt MCP is an MCP server for agent-to-agent USDC payments on Solana devnet, with programmable mandates that constrain budgets, counterparties, and payment timing. Built at the FinTechers hackathon in Prague, 19–20 October 2026.
+
+The bounded real-agent experimental devnet workflow was accepted on 20 October
+2026. See the [current status](../README.md#status) and
+[release gate](../docs/RELEASE-GATE.md) for the exact source pair, finalized
+1 → 0.65 capture + 0.35 atomic release, and accepted limits. Mock remains the
+default. The completed experiment's authorization is not reusable; event delivery
+remains open in [#15](https://github.com/bubon-ik/singit-agent-pay/issues/15).
 
 ## Quick start
 
@@ -107,7 +114,7 @@ Default mock balances (`DEFAULT_MOCK_BALANCES`): `buyer-agent` and `agent:resear
 
 ## Safety
 
-This project targets Solana devnet and devnet USDC only. Keys: devnet throwaway keypairs generated locally by the team, loaded from env (`SINGIT_PAYER_KEYPAIR` / `SINGIT_MERCHANT_KEYPAIR`), never committed; agents never see keys. Never real or mainnet keys. `txSig` is a mock ref (`mock-tx-N`) until `Capture402Backend` is wired to devnet; only then it is a devnet signature that links to the Solana explorer (`https://explorer.solana.com/tx/<sig>?cluster=devnet`). The MCP server never needs the human approval secret on the agent side.
+This project targets Solana devnet and devnet USDC only. Keys: devnet throwaway keypairs generated locally by the team, loaded from env (`SINGIT_PAYER_KEYPAIR` / `SINGIT_MERCHANT_KEYPAIR`), never committed; agents never see keys. Never real or mainnet keys. With `MockBackend`, `txSig` is a mock ref (`mock-tx-N`), not an Explorer receipt. With the configured `Capture402Backend`, it is a Solana devnet signature; only the original finalized success proves payment execution. The MCP server never needs the human approval secret on the agent side.
 
 ## Built during the hackathon
 
